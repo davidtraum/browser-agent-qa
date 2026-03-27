@@ -22,6 +22,9 @@ backend/
 cli/
   src/
     bin/
+ui/
+  backend/
+  frontend/
 worker/
   worker.py
   requirements.txt
@@ -276,6 +279,77 @@ test-status \
   --serviceUrl http://localhost:3000 \
   --testId 42
 ```
+
+## UI
+
+The web UI now lives in `ui/` and is split into:
+
+- `ui/backend`: Next.js + TypeScript backend for frontend-facing API routes
+- `ui/frontend`: Vue 3 + TypeScript app for the live issue feed
+
+### UI backend config
+
+Copy the backend env example:
+
+```bash
+cd ui/backend
+cp .env.example .env.local
+```
+
+Key values:
+
+- `BROWSER_AGENT_SERVICE_URL`: URL of the existing Docker/browser-agent service
+- `TARGET_APP_URL`: the application under test that the worker should open
+
+Example:
+
+```env
+BROWSER_AGENT_SERVICE_URL=http://localhost:3000
+TARGET_APP_URL=http://host.docker.internal:5173
+PORT=4000
+```
+
+### Start the UI backend
+
+```bash
+cd ui/backend
+npm install
+npm run dev
+```
+
+The Next.js API backend runs on `http://localhost:4000`.
+
+### Frontend config
+
+Copy the frontend env example:
+
+```bash
+cd ui/frontend
+cp .env.example .env
+```
+
+Example:
+
+```env
+VITE_UI_BACKEND_URL=http://localhost:4000
+```
+
+### Start the Vue frontend
+
+```bash
+cd ui/frontend
+npm install
+npm run dev
+```
+
+The Vue app runs on `http://localhost:5174`.
+
+### UI flow
+
+- Paste a GitHub issue URL into the large input field
+- Press `Enter`
+- The Vue app streams a live feed from the Next.js backend
+- The Next.js backend forwards the request to the browser-agent Docker service and polls the job until completion
 
 ## Notes
 

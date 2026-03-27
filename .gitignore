@@ -7,3 +7,7 @@ node_modules/
 backend/dist/
 cli/node_modules/
 cli/dist/
+ui/backend/node_modules/
+ui/backend/.next/
+ui/frontend/node_modules/
+ui/frontend/dist/
