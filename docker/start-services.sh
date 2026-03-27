@@ -21,6 +21,8 @@ cleanup() {
 
 trap cleanup SIGINT SIGTERM EXIT
 
+mkdir -p /tmp/browser-agent-shopware
+
 cd /app/backend
 node dist/index.js &
 backend_pid=$!
@@ -30,4 +32,3 @@ python worker.py &
 worker_pid=$!
 
 wait -n "${backend_pid}" "${worker_pid}"
-

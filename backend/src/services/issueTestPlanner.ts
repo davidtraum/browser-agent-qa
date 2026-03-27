@@ -74,18 +74,19 @@ export const deriveTestPlanFromIssue = async (issue: GitHubIssueSummary): Promis
       {
         role: 'system',
         content:
-          'You are a senior QA engineer. Read the GitHub issue and derive the smallest realistic browser test plan that validates the described behavior or bug fix. Focus on concrete UI actions and observable outcomes. Do not invent unavailable details.',
+          'You are a senior QA engineer focused on the Shopware Administration. Read the GitHub issue and derive the smallest realistic browser test plan that validates the described behavior or bug fix inside the Shopware admin. Focus on concrete UI actions and observable outcomes. When login is necessary, use the default administration credentials admin / shopware. Do not invent unavailable details.',
       },
       {
         role: 'user',
         content: [
-          'Create a browser test plan from this GitHub issue.',
+          'Create a browser test plan for the Shopware Administration from this GitHub issue.',
           '',
           'Requirements:',
           '- Return a concise summary of what should be validated.',
           '- Return a single task string suitable for an autonomous browser QA agent.',
           '- Return 3 to 8 explicit test steps in logical order.',
-          '- Mention login only if the issue suggests authenticated behavior.',
+          '- The task should assume the browser opens the Shopware Administration first.',
+          '- Mention login with admin / shopware whenever the admin needs authentication.',
           '- Prefer assertions that can be verified visually and in the DOM.',
           '',
           renderIssueContext(issue),

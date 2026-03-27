@@ -4,12 +4,16 @@
   "private": true,
   "bin": {
     "run-test": "dist/bin/run-test.js",
-    "test-status": "dist/bin/test-status.js"
+    "test-status": "dist/bin/test-status.js",
+    "test-tasks": "dist/bin/test-tasks.js",
+    "stop-test": "dist/bin/stop-test.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "run-test": "tsx src/bin/run-test.ts",
-    "test-status": "tsx src/bin/test-status.ts"
+    "test-status": "tsx src/bin/test-status.ts",
+    "test-tasks": "tsx src/bin/test-tasks.ts",
+    "stop-test": "tsx src/bin/stop-test.ts"
   },
   "devDependencies": {
     "@types/node": "^24.6.0",
@@ -17,4 +21,3 @@
     "typescript": "^5.9.3"
   }
 }
-

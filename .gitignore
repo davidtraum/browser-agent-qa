@@ -11,3 +11,4 @@ ui/backend/node_modules/
 ui/backend/.next/
 ui/frontend/node_modules/
 ui/frontend/dist/
+.shopware-workspaces/

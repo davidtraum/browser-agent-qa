@@ -1,14 +1,17 @@
 import asyncio
+import base64
 import json
 import logging
 import os
 import signal
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from browser_use import Agent, Browser, ChatOpenAI
 from bullmq import Worker
 from dotenv import load_dotenv
+from redis.asyncio import Redis
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -28,14 +31,22 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "o3")
 JOB_TIMEOUT_SECONDS = int(os.getenv("JOB_TIMEOUT_SECONDS", "120"))
 AGENT_MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "20"))
+CANCELLATION_TTL_SECONDS = 24 * 60 * 60
+PROGRESS_HISTORY_TTL_SECONDS = 7 * 24 * 60 * 60
+PROGRESS_HISTORY_MAX_ITEMS = 200
+redis_client = Redis.from_url(REDIS_URL, decode_responses=True)
 
-QA_INSTRUCTIONS = """You are an autonomous QA agent.
+QA_INSTRUCTIONS = """You are an autonomous QA agent for the Shopware Administration.
 
 * Follow the task step by step
-* If login is required, try common credentials provided in the task
+* If login is required, use the provided Shopware administration credentials first
 * Verify results using both DOM and visual cues
 * Stop when the goal is achieved or impossible
 """
+
+
+class TaskCancellationRequested(Exception):
+    pass
 
 
 def stringify(value: Any) -> str:
@@ -51,6 +62,16 @@ def stringify(value: Any) -> str:
         return str(value).strip()
 
 
+def compact_text(value: str | None, *, limit: int = 320) -> str:
+    text = stringify(value)
+    if not text:
+        return ""
+    single_line = " ".join(text.split())
+    if len(single_line) <= limit:
+        return single_line
+    return f"{single_line[: limit - 3].rstrip()}..."
+
+
 def pick_attr(target: Any, *names: str, default: Any = None) -> Any:
     for name in names:
         if isinstance(target, dict) and name in target:
@@ -60,17 +81,59 @@ def pick_attr(target: Any, *names: str, default: Any = None) -> Any:
     return default
 
 
-def build_prompt(url: str, task: str) -> str:
+def cancellation_key(job_id: str) -> str:
+    return f"{QUEUE_NAME}:cancel:{job_id}"
+
+
+def progress_history_key(job_id: str) -> str:
+    return f"{QUEUE_NAME}:progress:{job_id}"
+
+
+async def is_cancellation_requested(job_id: str) -> bool:
+    try:
+        value = await redis_client.get(cancellation_key(job_id))
+    except Exception:
+        return False
+    return value == "1"
+
+
+async def clear_cancellation_request(job_id: str) -> None:
+    try:
+        await redis_client.delete(cancellation_key(job_id))
+    except Exception as error:
+        logger.warning("Failed to clear cancellation flag for job %s: %s", job_id, error)
+
+
+async def clear_progress_history(job_id: str) -> None:
+    try:
+        await redis_client.delete(progress_history_key(job_id))
+    except Exception as error:
+        logger.warning("Failed to clear progress history for job %s: %s", job_id, error)
+
+
+async def ensure_not_cancelled(job_id: str) -> None:
+    if await is_cancellation_requested(job_id):
+        raise TaskCancellationRequested("Task cancellation was requested.")
+
+
+def build_prompt(url: str, task: str, shopware_context: dict[str, Any] | None) -> str:
+    branch = stringify((shopware_context or {}).get("branch")) or "unknown"
+    admin_username = stringify((shopware_context or {}).get("adminUsername")) or "admin"
+    admin_password = stringify((shopware_context or {}).get("adminPassword")) or "shopware"
+
     return f"""{QA_INSTRUCTIONS}
 
+Target application: Shopware Administration
+Branch under test: {branch}
 Start from this URL: {url}
+Default login credentials: {admin_username} / {admin_password}
 
 Task:
 {task}
 
 Important:
 - Keep the action count low and efficient.
-- If authentication is needed, try credentials explicitly mentioned in the task before giving up.
+- Prefer the Shopware administration credentials above whenever authentication is required.
 - The final answer must clearly say whether the requested check passed or failed and why.
 """
 
@@ -88,6 +151,83 @@ async def capture_current_url(agent: Agent) -> str | None:
         return await getter()
     except Exception:
         return None
+
+
+async def capture_screenshot_data_url(target: Any) -> str | None:
+    take_screenshot = getattr(target, "take_screenshot", None)
+    if not callable(take_screenshot):
+        return None
+
+    try:
+        screenshot_bytes = await take_screenshot(format="jpeg", quality=55)
+    except Exception:
+        return None
+
+    if not screenshot_bytes:
+        return None
+
+    encoded = base64.b64encode(screenshot_bytes).decode("ascii")
+    return f"data:image/jpeg;base64,{encoded}"
+
+
+def summarize_actions(agent_output: Any) -> str:
+    raw_actions = pick_attr(agent_output, "action", default=[]) or []
+    summaries: list[str] = []
+
+    for action in raw_actions:
+        action_payload = None
+        if hasattr(action, "model_dump"):
+            try:
+                action_payload = action.model_dump(exclude_none=True)
+            except Exception:
+                action_payload = None
+        elif isinstance(action, dict):
+            action_payload = action
+
+        if not action_payload:
+            continue
+
+        if len(action_payload) == 1:
+            action_name, action_args = next(iter(action_payload.items()))
+            if action_args in ({}, None):
+                summaries.append(str(action_name))
+            else:
+                summaries.append(f"{action_name} {compact_text(stringify(action_args), limit=140)}")
+        else:
+            summaries.append(compact_text(stringify(action_payload), limit=160))
+
+    return " -> ".join(summaries[:4])
+
+
+def build_agent_reasoning_detail(current_agent: Agent, current_url: str | None = None) -> str:
+    state = getattr(current_agent, "state", None)
+    agent_output = pick_attr(state, "last_model_output")
+    if agent_output is None:
+        return ""
+
+    current_state = pick_attr(agent_output, "current_state", default=agent_output)
+    detail_parts: list[str] = []
+
+    if current_url:
+        detail_parts.append(f"URL: {current_url}")
+
+    evaluation = compact_text(pick_attr(current_state, "evaluation_previous_goal"), limit=220)
+    if evaluation:
+        detail_parts.append(f"Eval: {evaluation}")
+
+    next_goal = compact_text(pick_attr(current_state, "next_goal"), limit=260)
+    if next_goal:
+        detail_parts.append(f"Goal: {next_goal}")
+
+    actions_summary = summarize_actions(agent_output)
+    if actions_summary:
+        detail_parts.append(f"Actions: {actions_summary}")
+
+    memory = compact_text(pick_attr(current_state, "memory"), limit=220)
+    if memory:
+        detail_parts.append(f"Memory: {memory}")
+
+    return "\n".join(detail_parts)
 
 
 def normalize_steps(history: Any) -> list[str]:
@@ -136,25 +276,95 @@ def normalize_errors(history: Any) -> list[str]:
     return errors
 
 
-async def run_browser_task(job_data: dict[str, Any]) -> dict[str, Any]:
+async def publish_execution_progress(
+    job: Any,
+    *,
+    job_id: str,
+    message: str,
+    detail: str = "",
+    step_number: int | None = None,
+    sequence: int | None = None,
+    screenshot: str | None = None,
+) -> None:
+    updater = getattr(job, "updateProgress", None)
+    if not callable(updater):
+        return
+
+    payload: dict[str, Any] = {
+        "stage": "execution",
+        "message": message,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    if detail:
+        payload["detail"] = detail
+    if step_number is not None:
+        payload["stepNumber"] = step_number
+    if sequence is not None:
+        payload["sequence"] = sequence
+    if screenshot:
+        payload["screenshot"] = screenshot
+
+    try:
+        await updater(payload)
+    except Exception as progress_error:
+        logger.warning("Failed to publish job progress: %s", progress_error)
+
+    try:
+        history_key = progress_history_key(job_id)
+        await redis_client.rpush(history_key, json.dumps(payload))
+        await redis_client.ltrim(history_key, -PROGRESS_HISTORY_MAX_ITEMS, -1)
+        await redis_client.expire(history_key, PROGRESS_HISTORY_TTL_SECONDS)
+    except Exception as progress_error:
+        logger.warning("Failed to append job progress history: %s", progress_error)
+
+
+async def run_browser_task(job: Any, job_data: dict[str, Any], job_id: str) -> dict[str, Any]:
     url = stringify(job_data.get("url"))
     task = stringify(job_data.get("task"))
+    shopware_context = pick_attr(job_data, "shopware", default={}) or {}
     max_steps = int(job_data.get("maxSteps") or AGENT_MAX_STEPS)
     timeout_seconds = int(job_data.get("timeoutSeconds") or JOB_TIMEOUT_SECONDS)
 
     logs: list[str] = []
     browser = Browser()
+    progress_sequence = 1
+
+    async def emit_progress(
+        message: str,
+        detail: str = "",
+        step_number: int | None = None,
+        screenshot: str | None = None,
+    ) -> None:
+        nonlocal progress_sequence
+        progress_sequence += 1
+        await publish_execution_progress(
+            job,
+            job_id=job_id,
+            message=message,
+            detail=detail,
+            step_number=step_number,
+            sequence=progress_sequence,
+            screenshot=screenshot,
+        )
 
     try:
+        await ensure_not_cancelled(job_id)
         llm = ChatOpenAI(model=OPENAI_MODEL)
         agent = Agent(
-            task=build_prompt(url, task),
+            task=build_prompt(url, task, shopware_context),
             llm=llm,
             browser=browser,
             use_vision=True,
         )
 
+        await emit_progress(
+            "Launching the browser agent.",
+            detail=f"Opening {url}",
+        )
+
         async def on_step_start(current_agent: Agent) -> None:
+            await ensure_not_cancelled(job_id)
             step_number = 1
             step_count_getter = pick_attr(current_agent.history, "number_of_steps")
             if callable(step_count_getter):
@@ -163,8 +373,22 @@ async def run_browser_task(job_data: dict[str, Any]) -> dict[str, Any]:
                 except Exception:
                     step_number = 1
             logs.append(f"Starting step {step_number}")
+            current_url = await capture_current_url(current_agent)
+            screenshot = await capture_screenshot_data_url(current_agent.browser_session)
+            detail = build_agent_reasoning_detail(current_agent, current_url)
+            if not detail:
+                detail = f"Inspecting page state before step {step_number}."
+                if current_url:
+                    detail = f"{detail} Current URL: {current_url}"
+            await emit_progress(
+                f"Running browser step {step_number}.",
+                detail=detail,
+                step_number=step_number,
+                screenshot=screenshot,
+            )
 
         async def on_step_end(current_agent: Agent) -> None:
+            await ensure_not_cancelled(job_id)
             step_count = pick_attr(current_agent.history, "number_of_steps")
             current_url = await capture_current_url(current_agent)
             step_label = "Completed step"
@@ -186,6 +410,21 @@ async def run_browser_task(job_data: dict[str, Any]) -> dict[str, Any]:
                 logs.append(f"{step_label} at {current_url} {last_action}".strip())
             else:
                 logs.append(f"{step_label} {last_action}".strip())
+
+            progress_detail_parts = []
+            if last_action:
+                progress_detail_parts.append(f"Observed action result: {compact_text(last_action, limit=220)}")
+            reasoning_detail = build_agent_reasoning_detail(current_agent, current_url)
+            if reasoning_detail:
+                progress_detail_parts.append(reasoning_detail)
+            screenshot = await capture_screenshot_data_url(current_agent.browser_session)
+
+            await emit_progress(
+                step_label,
+                detail="\n".join(progress_detail_parts),
+                step_number=int(step_count()) if callable(step_count) else None,
+                screenshot=screenshot,
+            )
 
         logger.info("Running browser task for %s", url)
         history = await asyncio.wait_for(
@@ -220,6 +459,12 @@ async def run_browser_task(job_data: dict[str, Any]) -> dict[str, Any]:
         if errors:
             logs.extend([f"Error: {error}" for error in errors])
 
+        await emit_progress(
+            "Browser run finished.",
+            detail=summary,
+            step_number=len(steps) if steps else None,
+        )
+
         return {
             "success": bool(success_value) if success_value is not None else not errors,
             "summary": summary,
@@ -229,6 +474,7 @@ async def run_browser_task(job_data: dict[str, Any]) -> dict[str, Any]:
             "metadata": {
                 "durationSeconds": duration_seconds,
                 "finalUrl": final_url,
+                "branch": stringify((shopware_context or {}).get("branch")) or None,
             },
         }
     finally:
@@ -252,14 +498,51 @@ async def process_job(job: Any, _job_token: str) -> dict[str, Any]:
     logger.info("Picked up job %s (attempt %s/%s)", job_id, attempts_made + 1, max_attempts)
 
     try:
-        result = await run_browser_task(job_data)
+        await ensure_not_cancelled(job_id)
+        await clear_progress_history(job_id)
+        await publish_execution_progress(
+            job,
+            job_id=job_id,
+            message="Worker picked up the browser run.",
+            detail=f"Attempt {attempts_made + 1} of {max_attempts}",
+            sequence=1,
+        )
+        result = await run_browser_task(job, job_data, job_id)
         result.setdefault("metadata", {})
         result["metadata"]["attemptsMade"] = attempts_made + 1
         logger.info("Job %s finished with success=%s", job_id, result.get("success"))
         return result
+    except TaskCancellationRequested as cancellation_error:
+        message = stringify(cancellation_error) or "Task cancellation was requested."
+        logger.info("Job %s was cancelled", job_id)
+        await publish_execution_progress(
+            job,
+            job_id=job_id,
+            message="Browser run cancelled.",
+            detail=message,
+            sequence=999996,
+        )
+        return {
+            "success": False,
+            "summary": message,
+            "steps": [],
+            "logs": [message],
+            "errors": [message],
+            "metadata": {
+                "attemptsMade": attempts_made + 1,
+                "cancelled": True,
+            },
+        }
     except asyncio.TimeoutError as timeout_error:
         message = f"Job timed out after {job_data.get('timeoutSeconds', JOB_TIMEOUT_SECONDS)} seconds."
         logger.exception("Job %s timed out", job_id)
+        await publish_execution_progress(
+            job,
+            job_id=job_id,
+            message="Browser run timed out.",
+            detail=message,
+            sequence=999997,
+        )
         if attempts_made + 1 >= max_attempts:
             return {
                 "success": False,
@@ -275,6 +558,13 @@ async def process_job(job: Any, _job_token: str) -> dict[str, Any]:
     except Exception as error:
         message = f"Browser task failed: {error}"
         logger.exception("Job %s failed", job_id)
+        await publish_execution_progress(
+            job,
+            job_id=job_id,
+            message="Browser run failed.",
+            detail=stringify(error),
+            sequence=999998,
+        )
         if attempts_made + 1 >= max_attempts:
             return {
                 "success": False,
@@ -287,6 +577,8 @@ async def process_job(job: Any, _job_token: str) -> dict[str, Any]:
                 },
             }
         raise
+    finally:
+        await clear_cancellation_request(job_id)
 
 
 async def main() -> None:
@@ -314,6 +606,7 @@ async def main() -> None:
     await shutdown_event.wait()
     logger.info("Closing worker")
     await worker.close()
+    await redis_client.aclose()
 
 
 if __name__ == "__main__":

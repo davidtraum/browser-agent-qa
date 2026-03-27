@@ -5,7 +5,5 @@ export async function GET() {
   return NextResponse.json({
     ok: true,
     serviceUrl: backendConfig.browserAgentServiceUrl,
-    targetAppUrl: backendConfig.targetAppUrl,
   });
 }
-

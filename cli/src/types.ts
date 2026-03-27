@@ -8,6 +8,7 @@ export interface RunTestResult {
     durationSeconds?: number;
     attemptsMade?: number;
     finalUrl?: string | null;
+    branch?: string | null;
+    cancelled?: boolean;
   };
 }
-

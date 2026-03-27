@@ -1,21 +1,16 @@
-import { getBooleanFlag, parseArgs, requireStringFlag } from './args';
-import { fetchTestStatus, queueTestFromIssue } from './client';
-import {
-  formatCompactStatusSummary,
-  formatVerboseStatusDetails,
-  isTerminalStatus,
-  sleep,
-} from './output';
-
-const POLL_INTERVAL_MS = 3000;
+import { getBooleanFlag, getStringFlag, parseArgs, requireStringFlag } from './args';
+import type { IssueRunStreamEvent, TestStatusCliResponse } from './client';
+import { queueTestFromIssue, streamTestFromIssue } from './client';
+import { formatCompactStatusSummary, formatProgressEvent, formatVerboseResultDetails } from './output';
+const DEFAULT_BRANCH = 'trunk';
 
 const usage = `Usage:
-  run-test --issueUrl URL --url URL --serviceUrl URL [--poll] [--verbose]
+  run-test --issueUrl URL --serviceUrl URL [--branch BRANCH] [--poll] [--verbose]
 
 Examples:
-  run-test --issueUrl https://github.com/acme/app/issues/123 --url http://localhost:5000 --serviceUrl http://localhost:3000
-  run-test --issueUrl https://github.com/acme/app/issues/123 --url http://localhost:5000 --serviceUrl http://localhost:3000 --poll
-  run-test --issueUrl https://github.com/acme/app/issues/123 --url http://localhost:5000 --serviceUrl http://localhost:3000 --poll --verbose`;
+  run-test --issueUrl https://github.com/shopware/shopware/issues/15805 --serviceUrl http://localhost:3000
+  run-test --issueUrl https://github.com/shopware/shopware/issues/15805 --serviceUrl http://localhost:3000 --branch trunk --poll
+  run-test --issueUrl https://github.com/shopware/shopware/issues/15805 --serviceUrl http://localhost:3000 --branch trunk --poll --verbose`;
 
 export const runRunTestCommand = async (argv: string[]): Promise<void> => {
   if (argv.includes('--help')) {
@@ -25,54 +20,79 @@ export const runRunTestCommand = async (argv: string[]): Promise<void> => {
 
   const parsed = parseArgs(argv);
   const issueUrl = requireStringFlag(parsed, 'issueUrl');
-  const url = requireStringFlag(parsed, 'url');
   const serviceUrl = requireStringFlag(parsed, 'serviceUrl');
   const shouldPoll = getBooleanFlag(parsed, 'poll');
   const isVerbose = getBooleanFlag(parsed, 'verbose');
-
-  const queued = await queueTestFromIssue({
-    issueUrl,
-    serviceUrl,
-    url,
-  });
-
-  console.log(`testId: ${queued.jobId}`);
+  const branch = getStringFlag(parsed, 'branch') || DEFAULT_BRANCH;
 
   if (!shouldPoll) {
+    const queued = await queueTestFromIssue({
+      branch,
+      issueUrl,
+      serviceUrl,
+    });
+
+    console.log(`testId: ${queued.jobId}`);
+    console.log(`branch: ${queued.branch}`);
     return;
   }
 
-  console.log(`issue: ${queued.issue.title} (${queued.issue.url})`);
-  console.log(`plan: ${queued.summary}`);
-  if (isVerbose) {
-    for (const step of queued.generatedSteps) {
-      console.log(`- ${step}`);
-    }
-  }
+  const finalStatus: TestStatusCliResponse = {
+    jobId: 'pending',
+    status: 'queued',
+    attemptsMade: 0,
+  };
 
-  let previousStatus = '';
-  for (;;) {
-    const status = await fetchTestStatus({
+  await streamTestFromIssue(
+    {
+      branch,
+      issueUrl,
       serviceUrl,
-      testId: queued.jobId,
-    });
-
-    if (status.status !== previousStatus && !isTerminalStatus(status.status)) {
-      console.log(`status: ${status.status}`);
-      previousStatus = status.status;
-    }
-
-    if (isTerminalStatus(status.status)) {
-      console.log(formatCompactStatusSummary(status));
-      if (isVerbose) {
-        const verboseDetails = formatVerboseStatusDetails(status);
-        if (verboseDetails) {
-          console.log(verboseDetails);
-        }
+    },
+    (event: IssueRunStreamEvent) => {
+      switch (event.type) {
+        case 'accepted':
+          console.log(`stream: accepted ${event.issueUrl} on branch ${event.branch}`);
+          console.log(`branch: ${event.branch}`);
+          break;
+        case 'progress':
+          console.log(formatProgressEvent(event));
+          break;
+        case 'issue':
+          console.log(`issue: ${event.issue.title} (${event.issue.url})`);
+          break;
+        case 'plan':
+          console.log(`plan: ${event.summary}`);
+          if (isVerbose) {
+            for (const step of event.generatedSteps) {
+              console.log(`- ${step}`);
+            }
+          }
+          break;
+        case 'job':
+          finalStatus.jobId = event.jobId;
+          console.log(`testId: ${event.jobId}`);
+          console.log(`admin: ${event.adminUrl}`);
+          break;
+        case 'status':
+          finalStatus.status = event.status;
+          finalStatus.attemptsMade = event.attemptsMade;
+          console.log(`status: ${event.status}`);
+          break;
+        case 'result':
+          finalStatus.result = event.result;
+          finalStatus.status = event.result.success ? 'completed' : 'failed';
+          console.log(formatCompactStatusSummary(finalStatus));
+          if (isVerbose) {
+            const verboseDetails = formatVerboseResultDetails(event.result);
+            if (verboseDetails) {
+              console.log(verboseDetails);
+            }
+          }
+          break;
+        case 'error':
+          throw new Error(event.message);
       }
-      return;
-    }
-
-    await sleep(POLL_INTERVAL_MS);
-  }
+    },
+  );
 };

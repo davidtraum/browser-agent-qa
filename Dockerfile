@@ -7,7 +7,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ca-certificates gnupg \
+    && apt-get install -y --no-install-recommends curl ca-certificates gnupg git docker.io docker-compose-v2 \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
       | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
@@ -37,6 +37,7 @@ RUN chmod +x /app/docker/start-services.sh
 
 WORKDIR /app
 ENV NODE_ENV=production
+RUN mkdir -p /tmp/browser-agent-shopware
 EXPOSE 3000
 
 CMD ["/app/docker/start-services.sh"]

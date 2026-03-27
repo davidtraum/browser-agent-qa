@@ -3,4 +3,4 @@ bullmq>=2.11.1
 openai>=1.109.1
 pydantic>=2.11.7
 python-dotenv>=1.1.1
-
+redis>=5.2.1
