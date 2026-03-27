@@ -1,12 +1,13 @@
 import { parseArgs, requireStringFlag } from './args';
 import { fetchTestStatus } from './client';
-import { formatStatusSummary } from './output';
+import { formatCompactStatusSummary, formatVerboseStatusDetails } from './output';
 
 const usage = `Usage:
-  test-status --serviceUrl URL --testId ID
+  test-status --serviceUrl URL --testId ID [--verbose]
 
 Example:
-  test-status --serviceUrl http://localhost:3000 --testId 42`;
+  test-status --serviceUrl http://localhost:3000 --testId 42
+  test-status --serviceUrl http://localhost:3000 --testId 42 --verbose`;
 
 export const runTestStatusCommand = async (argv: string[]): Promise<void> => {
   if (argv.includes('--help')) {
@@ -17,12 +18,18 @@ export const runTestStatusCommand = async (argv: string[]): Promise<void> => {
   const parsed = parseArgs(argv);
   const serviceUrl = requireStringFlag(parsed, 'serviceUrl');
   const testId = requireStringFlag(parsed, 'testId');
+  const isVerbose = parsed.flags.get('verbose') === true;
 
   const status = await fetchTestStatus({
     serviceUrl,
     testId,
   });
 
-  console.log(formatStatusSummary(status));
+  console.log(formatCompactStatusSummary(status));
+  if (isVerbose) {
+    const verboseDetails = formatVerboseStatusDetails(status);
+    if (verboseDetails) {
+      console.log(verboseDetails);
+    }
+  }
 };
-

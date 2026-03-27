@@ -9,7 +9,7 @@ export const sleep = async (ms: number): Promise<void> =>
     setTimeout(resolve, ms);
   });
 
-export const formatStatusSummary = (status: TestStatusCliResponse): string => {
+export const formatCompactStatusSummary = (status: TestStatusCliResponse): string => {
   const lines = [
     `testId: ${status.jobId}`,
     `status: ${status.status}`,
@@ -19,21 +19,31 @@ export const formatStatusSummary = (status: TestStatusCliResponse): string => {
   if (status.result) {
     lines.push(`success: ${status.result.success}`);
     lines.push(`summary: ${status.result.summary}`);
-    if (status.result.steps.length > 0) {
-      lines.push('steps:');
-      for (const step of status.result.steps) {
-        lines.push(`- ${step}`);
-      }
-    }
-
-    if (status.result.logs.length > 0) {
-      lines.push('logs:');
-      for (const log of status.result.logs) {
-        lines.push(`- ${log}`);
-      }
-    }
   }
 
   return lines.join('\n');
 };
 
+export const formatVerboseStatusDetails = (status: TestStatusCliResponse): string => {
+  if (!status.result) {
+    return '';
+  }
+
+  const lines: string[] = [];
+
+  if (status.result.steps.length > 0) {
+    lines.push('steps:');
+    for (const step of status.result.steps) {
+      lines.push(`- ${step}`);
+    }
+  }
+
+  if (status.result.logs.length > 0) {
+    lines.push('logs:');
+    for (const log of status.result.logs) {
+      lines.push(`- ${log}`);
+    }
+  }
+
+  return lines.join('\n');
+};

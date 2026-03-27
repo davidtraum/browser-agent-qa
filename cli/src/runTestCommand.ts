@@ -1,15 +1,21 @@
 import { getBooleanFlag, parseArgs, requireStringFlag } from './args';
 import { fetchTestStatus, queueTestFromIssue } from './client';
-import { formatStatusSummary, isTerminalStatus, sleep } from './output';
+import {
+  formatCompactStatusSummary,
+  formatVerboseStatusDetails,
+  isTerminalStatus,
+  sleep,
+} from './output';
 
 const POLL_INTERVAL_MS = 3000;
 
 const usage = `Usage:
-  run-test --issueUrl URL --url URL --serviceUrl URL [--poll]
+  run-test --issueUrl URL --url URL --serviceUrl URL [--poll] [--verbose]
 
 Examples:
   run-test --issueUrl https://github.com/acme/app/issues/123 --url http://localhost:5000 --serviceUrl http://localhost:3000
-  run-test --issueUrl https://github.com/acme/app/issues/123 --url http://localhost:5000 --serviceUrl http://localhost:3000 --poll`;
+  run-test --issueUrl https://github.com/acme/app/issues/123 --url http://localhost:5000 --serviceUrl http://localhost:3000 --poll
+  run-test --issueUrl https://github.com/acme/app/issues/123 --url http://localhost:5000 --serviceUrl http://localhost:3000 --poll --verbose`;
 
 export const runRunTestCommand = async (argv: string[]): Promise<void> => {
   if (argv.includes('--help')) {
@@ -22,6 +28,7 @@ export const runRunTestCommand = async (argv: string[]): Promise<void> => {
   const url = requireStringFlag(parsed, 'url');
   const serviceUrl = requireStringFlag(parsed, 'serviceUrl');
   const shouldPoll = getBooleanFlag(parsed, 'poll');
+  const isVerbose = getBooleanFlag(parsed, 'verbose');
 
   const queued = await queueTestFromIssue({
     issueUrl,
@@ -37,8 +44,10 @@ export const runRunTestCommand = async (argv: string[]): Promise<void> => {
 
   console.log(`issue: ${queued.issue.title} (${queued.issue.url})`);
   console.log(`plan: ${queued.summary}`);
-  for (const step of queued.generatedSteps) {
-    console.log(`- ${step}`);
+  if (isVerbose) {
+    for (const step of queued.generatedSteps) {
+      console.log(`- ${step}`);
+    }
   }
 
   let previousStatus = '';
@@ -48,17 +57,22 @@ export const runRunTestCommand = async (argv: string[]): Promise<void> => {
       testId: queued.jobId,
     });
 
-    if (status.status !== previousStatus) {
+    if (status.status !== previousStatus && !isTerminalStatus(status.status)) {
       console.log(`status: ${status.status}`);
       previousStatus = status.status;
     }
 
     if (isTerminalStatus(status.status)) {
-      console.log(formatStatusSummary(status));
+      console.log(formatCompactStatusSummary(status));
+      if (isVerbose) {
+        const verboseDetails = formatVerboseStatusDetails(status);
+        if (verboseDetails) {
+          console.log(verboseDetails);
+        }
+      }
       return;
     }
 
     await sleep(POLL_INTERVAL_MS);
   }
 };
-
