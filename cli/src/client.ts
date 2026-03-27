@@ -1,4 +1,4 @@
-import type { RunTestResult } from '../types/runTest';
+import type { RunTestResult } from './types';
 
 export interface RunTestFromIssueCliResponse {
   jobId: string;

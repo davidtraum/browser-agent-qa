@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { runRunTestCommand } from '../cli/runTestCommand';
+import { runRunTestCommand } from '../runTestCommand';
 
 void runRunTestCommand(process.argv.slice(2)).catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);

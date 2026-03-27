@@ -19,6 +19,9 @@ backend/
     api/
     queue/
     types/
+cli/
+  src/
+    bin/
 worker/
   worker.py
   requirements.txt
@@ -231,10 +234,12 @@ curl -X POST http://localhost:3000/run-test-from-issue \
 
 ## CLI
 
-Build the backend once so the CLI binaries exist:
+The CLI now lives in its own package under `cli/`.
+
+Build the CLI:
 
 ```bash
-cd backend
+cd cli
 npm install
 npm run build
 ```
