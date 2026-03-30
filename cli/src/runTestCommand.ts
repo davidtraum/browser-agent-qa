@@ -5,10 +5,12 @@ import { formatCompactStatusSummary, formatProgressEvent, formatVerboseResultDet
 const DEFAULT_BRANCH = 'trunk';
 
 const usage = `Usage:
-  run-test --issueUrl URL --serviceUrl URL [--branch BRANCH] [--poll] [--verbose]
+  run-test (--input TEXT | --issueUrl URL) --serviceUrl URL [--branch BRANCH] [--poll] [--verbose]
 
 Examples:
+  run-test --input "Open profile settings and verify the avatar is visible" --serviceUrl http://localhost:3000
   run-test --issueUrl https://github.com/shopware/shopware/issues/15805 --serviceUrl http://localhost:3000
+  run-test --issueUrl https://github.com/shopware/shopware/pull/12345 --serviceUrl http://localhost:3000
   run-test --issueUrl https://github.com/shopware/shopware/issues/15805 --serviceUrl http://localhost:3000 --branch trunk --poll
   run-test --issueUrl https://github.com/shopware/shopware/issues/15805 --serviceUrl http://localhost:3000 --branch trunk --poll --verbose`;
 
@@ -19,7 +21,10 @@ export const runRunTestCommand = async (argv: string[]): Promise<void> => {
   }
 
   const parsed = parseArgs(argv);
-  const issueUrl = requireStringFlag(parsed, 'issueUrl');
+  const input = getStringFlag(parsed, 'input') || getStringFlag(parsed, 'issueUrl');
+  if (!input) {
+    throw new Error('Either --input or --issueUrl is required.');
+  }
   const serviceUrl = requireStringFlag(parsed, 'serviceUrl');
   const shouldPoll = getBooleanFlag(parsed, 'poll');
   const isVerbose = getBooleanFlag(parsed, 'verbose');
@@ -28,7 +33,7 @@ export const runRunTestCommand = async (argv: string[]): Promise<void> => {
   if (!shouldPoll) {
     const queued = await queueTestFromIssue({
       branch,
-      issueUrl,
+      input,
       serviceUrl,
     });
 
@@ -46,20 +51,20 @@ export const runRunTestCommand = async (argv: string[]): Promise<void> => {
   await streamTestFromIssue(
     {
       branch,
-      issueUrl,
+      input,
       serviceUrl,
     },
     (event: IssueRunStreamEvent) => {
       switch (event.type) {
         case 'accepted':
-          console.log(`stream: accepted ${event.issueUrl} on branch ${event.branch}`);
+          console.log(`stream: accepted ${event.sourceKind} input on branch ${event.branch}`);
           console.log(`branch: ${event.branch}`);
           break;
         case 'progress':
           console.log(formatProgressEvent(event));
           break;
         case 'issue':
-          console.log(`issue: ${event.issue.title} (${event.issue.url})`);
+          console.log(`${event.issue.kind === 'pull_request' ? 'pr' : 'issue'}: ${event.issue.title} (${event.issue.url})`);
           break;
         case 'plan':
           console.log(`plan: ${event.summary}`);

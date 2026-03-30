@@ -26,7 +26,8 @@ export interface ProgressSnapshot {
 export type IssueRunStreamEvent =
   | {
       type: 'accepted';
-      issueUrl: string;
+      input: string;
+      sourceKind: 'github' | 'scenario';
       branch: string;
       timestamp: string;
     }
@@ -43,6 +44,7 @@ export type IssueRunStreamEvent =
   | {
       type: 'issue';
       issue: {
+        kind: 'issue' | 'pull_request';
         url: string;
         title: string;
         repository: string;
@@ -80,7 +82,11 @@ export interface RunTestFromIssueCliResponse {
   status: string;
   branch: string;
   adminUrl: string;
-  issue: {
+  sourceKind: 'github' | 'scenario';
+  sourceInput: string;
+  sourceTitle: string;
+  issue?: {
+    kind: 'issue' | 'pull_request';
     url: string;
     title: string;
     repository: string;
@@ -103,6 +109,8 @@ export interface ManagedTaskSummaryCliResponse {
   jobId: string;
   status: string;
   attemptsMade: number;
+  sourceKind?: 'issue' | 'pull_request' | 'scenario';
+  sourceInput?: string;
   branch?: string;
   issueUrl?: string;
   issueTitle?: string;
@@ -150,7 +158,7 @@ const readJsonResponse = async <T>(response: Response): Promise<T> => {
 
 export const queueTestFromIssue = async (params: {
   branch?: string;
-  issueUrl: string;
+  input: string;
   serviceUrl: string;
 }): Promise<RunTestFromIssueCliResponse> => {
   const response = await fetch(`${normalizeServiceUrl(params.serviceUrl)}/run-test-from-issue`, {
@@ -160,7 +168,7 @@ export const queueTestFromIssue = async (params: {
     },
     body: JSON.stringify({
       branch: params.branch,
-      issueUrl: params.issueUrl,
+      input: params.input,
     }),
   });
 
@@ -170,7 +178,7 @@ export const queueTestFromIssue = async (params: {
 export const streamTestFromIssue = async (
   params: {
     branch?: string;
-    issueUrl: string;
+    input: string;
     serviceUrl: string;
   },
   onEvent: (event: IssueRunStreamEvent) => void,
@@ -183,7 +191,7 @@ export const streamTestFromIssue = async (
     },
     body: JSON.stringify({
       branch: params.branch,
-      issueUrl: params.issueUrl,
+      input: params.input,
     }),
   });
 

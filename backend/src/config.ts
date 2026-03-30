@@ -18,15 +18,28 @@ const parseNumber = (value: string | undefined, fallback: number): number => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 };
 
+const normalizeAiProvider = (value: string | undefined): 'openai' | 'codex_cli' => {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === 'codex' || normalized === 'codex_cli') {
+    return 'codex_cli';
+  }
+
+  return 'openai';
+};
+
 export const config = {
   nodeEnv: process.env.NODE_ENV ?? 'development',
   port: parseNumber(process.env.PORT, 3000),
+  aiProvider: normalizeAiProvider(process.env.AI_PROVIDER),
   redisUrl: process.env.REDIS_URL ?? 'redis://127.0.0.1:6379',
   queueName: process.env.QUEUE_NAME ?? 'browser-tests',
   jobTimeoutSeconds: parseNumber(process.env.JOB_TIMEOUT_SECONDS, 300),
   agentMaxSteps: parseNumber(process.env.AGENT_MAX_STEPS, 20),
   openAiApiKey: process.env.OPENAI_API_KEY ?? '',
   issuePlannerModel: process.env.ISSUE_PLANNER_MODEL ?? 'gpt-4o-mini',
+  codexCliPath: process.env.CODEX_CLI_PATH?.trim() || 'codex',
+  codexModel: process.env.CODEX_MODEL?.trim() || 'gpt-5',
+  codexCliTimeoutSeconds: parseNumber(process.env.CODEX_CLI_TIMEOUT_SECONDS, 180),
   githubToken: process.env.GITHUB_TOKEN ?? '',
   shopwareDefaultBranch: process.env.SHOPWARE_DEFAULT_BRANCH?.trim() || 'trunk',
   shopwareRepoUrl: process.env.SHOPWARE_REPO_URL?.trim() || 'https://github.com/shopware/shopware.git',

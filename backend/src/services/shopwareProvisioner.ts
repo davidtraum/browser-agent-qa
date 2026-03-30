@@ -87,6 +87,35 @@ const toCommandError = (command: string, args: string[], code: number | null, st
   return new Error(`${command} ${args.join(' ')} exited with code ${code ?? 'unknown'}.${suffix}`);
 };
 
+const extractCommandFailureOutput = (error: unknown): string => {
+  if (error instanceof Error) {
+    const details = [error.message];
+    const maybeStdout = (error as Error & { stdout?: string }).stdout;
+    const maybeStderr = (error as Error & { stderr?: string }).stderr;
+
+    if (typeof maybeStdout === 'string' && maybeStdout.trim()) {
+      details.push(maybeStdout.trim());
+    }
+    if (typeof maybeStderr === 'string' && maybeStderr.trim()) {
+      details.push(maybeStderr.trim());
+    }
+
+    return details.join('\n');
+  }
+
+  return String(error);
+};
+
+const shouldUseLegacyAdminOnlySetupFallback = (error: unknown): boolean => {
+  const output = extractCommandFailureOutput(error);
+
+  return (
+    output.includes('npm ci') &&
+    output.includes('package.json and package-lock.json') &&
+    (output.includes('npm:storefront') || output.includes('init:js'))
+  );
+};
+
 const createChunkForwarder = (
   stream: 'stdout' | 'stderr',
   onOutput: ((line: string, stream: 'stdout' | 'stderr') => void | Promise<void>) | undefined,
@@ -510,20 +539,109 @@ const runShopwareSetup = async (
   workspaceDir: string,
   progressReporter?: ProvisionProgressReporter,
 ): Promise<void> => {
+  const setupTimeoutMs = config.shopwareProvisionTimeoutSeconds * 1000;
+
+  try {
+    await reportProgress(progressReporter, {
+      stage: 'setup',
+      message: 'Running Shopware composer setup.',
+    });
+    await runStreamingCommand('docker', ['compose', 'exec', '-T', 'web', 'composer', 'setup', '--no-interaction'], {
+      cwd: workspaceDir,
+      timeoutMs: setupTimeoutMs,
+      onOutput: (line) =>
+        reportProgress(progressReporter, {
+          stage: 'setup',
+          message: 'Running Shopware composer setup.',
+          detail: line,
+        }),
+    });
+    return;
+  } catch (error) {
+    if (!shouldUseLegacyAdminOnlySetupFallback(error)) {
+      throw error;
+    }
+
+    await reportProgress(progressReporter, {
+      stage: 'setup',
+      message: 'Composer setup hit a legacy storefront npm lockfile issue. Falling back to an admin-only setup path.',
+      detail: 'Continuing with system install and administration npm install so QA runs can still start.',
+    });
+
+    await runStreamingCommand(
+      'docker',
+      [
+        'compose',
+        'exec',
+        '-T',
+        'web',
+        'php',
+        'bin/console',
+        'system:install',
+        '--drop-database',
+        '--basic-setup',
+        '--force',
+        '--no-assign-theme',
+      ],
+      {
+        cwd: workspaceDir,
+        timeoutMs: setupTimeoutMs,
+        onOutput: (line) =>
+          reportProgress(progressReporter, {
+            stage: 'setup',
+            message: 'Running Shopware system install fallback.',
+            detail: line,
+          }),
+      },
+    );
+
+    await runStreamingCommand(
+      'docker',
+      [
+        'compose',
+        'exec',
+        '-T',
+        'web',
+        'sh',
+        '-lc',
+        'cd src/Administration/Resources/app/administration && npm install --no-audit --prefer-offline',
+      ],
+      {
+        cwd: workspaceDir,
+        timeoutMs: setupTimeoutMs,
+        onOutput: (line) =>
+          reportProgress(progressReporter, {
+            stage: 'setup',
+            message: 'Installing administration npm dependencies for the fallback setup.',
+            detail: line,
+          }),
+      },
+    );
+  }
+};
+
+const runShopwareDemoData = async (
+  workspaceDir: string,
+  progressReporter?: ProvisionProgressReporter,
+): Promise<void> => {
   await reportProgress(progressReporter, {
     stage: 'setup',
-    message: 'Running Shopware composer setup.',
+    message: 'Loading Shopware framework demo data.',
   });
-  await runStreamingCommand('docker', ['compose', 'exec', '-T', 'web', 'composer', 'setup', '--no-interaction'], {
-    cwd: workspaceDir,
-    timeoutMs: config.shopwareProvisionTimeoutSeconds * 1000,
-    onOutput: (line) =>
-      reportProgress(progressReporter, {
-        stage: 'setup',
-        message: 'Running Shopware composer setup.',
-        detail: line,
-      }),
-  });
+  await runStreamingCommand(
+    'docker',
+    ['compose', 'exec', '-T', 'web', 'bin/console', 'framework:demodata', '--no-interaction'],
+    {
+      cwd: workspaceDir,
+      timeoutMs: config.shopwareProvisionTimeoutSeconds * 1000,
+      onOutput: (line) =>
+        reportProgress(progressReporter, {
+          stage: 'setup',
+          message: 'Loading Shopware framework demo data.',
+          detail: line,
+        }),
+    },
+  );
 };
 
 const startAdministrationWatcher = async (
@@ -645,6 +763,7 @@ export const prepareShopwareAdministration = async (
   await ensureRepositoryCheckout(branch, workspaceDir, progressReporter);
   await ensureDockerServicesRunning(workspaceDir, progressReporter);
   await runShopwareSetup(workspaceDir, progressReporter);
+  await runShopwareDemoData(workspaceDir, progressReporter);
   await startAdministrationWatcher(workspaceDir, progressReporter);
   await reportProgress(progressReporter, {
     stage: 'ready',

@@ -13,7 +13,19 @@ const truncate = (value: string, maxLength = MAX_FIELD_LENGTH): string => {
   return `${value.slice(0, maxLength - 3)}...`;
 };
 
-const parseGitHubIssueUrl = (issueUrl: string) => {
+export const isGitHubReferenceUrl = (value: string): boolean => {
+  try {
+    const parsedUrl = new URL(value);
+    return (
+      parsedUrl.hostname === 'github.com' &&
+      /^\/[^/]+\/[^/]+\/(issues|pull)\/\d+(?:\/|$)/.test(parsedUrl.pathname)
+    );
+  } catch {
+    return false;
+  }
+};
+
+export const parseGitHubReferenceUrl = (issueUrl: string) => {
   let parsedUrl: URL;
 
   try {
@@ -26,15 +38,18 @@ const parseGitHubIssueUrl = (issueUrl: string) => {
     throw new Error('Field "issueUrl" must point to github.com.');
   }
 
-  const match = parsedUrl.pathname.match(/^\/([^/]+)\/([^/]+)\/issues\/(\d+)(?:\/|$)/);
+  const match = parsedUrl.pathname.match(/^\/([^/]+)\/([^/]+)\/(issues|pull)\/(\d+)(?:\/|$)/);
   if (!match) {
-    throw new Error('Field "issueUrl" must match https://github.com/<owner>/<repo>/issues/<number>.');
+    throw new Error(
+      'Field "issueUrl" must match https://github.com/<owner>/<repo>/issues/<number> or https://github.com/<owner>/<repo>/pull/<number>.',
+    );
   }
 
-  const [, owner, repo, issueNumber] = match;
+  const [, owner, repo, referenceType, issueNumber] = match;
   return {
     owner,
     repo,
+    referenceType: (referenceType === 'pull' ? 'pull_request' : 'issue') as 'issue' | 'pull_request',
     issueNumber: Number(issueNumber),
   };
 };
@@ -75,6 +90,10 @@ interface GitHubIssueApiResponse {
   labels: Array<{ name?: string }>;
   comments_url: string;
   number: number;
+  pull_request?: {
+    url?: string;
+    html_url?: string;
+  };
 }
 
 interface GitHubIssueCommentApiResponse {
@@ -84,13 +103,15 @@ interface GitHubIssueCommentApiResponse {
 }
 
 export const getGitHubIssueSummary = async (issueUrl: string): Promise<GitHubIssueSummary> => {
-  const { owner, repo, issueNumber } = parseGitHubIssueUrl(issueUrl);
+  const { owner, repo, issueNumber, referenceType } = parseGitHubReferenceUrl(issueUrl);
   const apiUrl = `https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}`;
 
   const issue = await fetchJson<GitHubIssueApiResponse>(apiUrl);
   const comments = await fetchJson<GitHubIssueCommentApiResponse[]>(issue.comments_url);
+  const kind = (issue.pull_request ? 'pull_request' : referenceType) as 'issue' | 'pull_request';
 
   return {
+    kind,
     url: issue.html_url,
     apiUrl: issue.url,
     repository: `${owner}/${repo}`,

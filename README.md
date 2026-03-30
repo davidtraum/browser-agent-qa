@@ -8,7 +8,7 @@ Minimal local setup for running Shopware Administration QA tasks through a Node.
 - BullMQ + Redis for queueing
 - Python worker using browser-use and Playwright
 - OpenAI for agent reasoning
-- GitHub issue ingestion for AI-generated Shopware Administration test plans
+- GitHub issue/PR ingestion plus freeform scenario input for AI-generated Shopware Administration test plans
 - Shopware branch provisioning from `shopware/shopware`
 - Optional single Docker image that runs backend and worker together
 
@@ -33,7 +33,7 @@ worker/
 
 ## What It Does
 
-- Accepts a GitHub issue URL from `shopware/shopware`
+- Accepts either a GitHub issue/PR URL or a freeform Shopware Administration scenario
 - Lets you choose a Shopware branch, defaulting to `trunk`
 - Checks out that branch locally
 - Starts Shopware with the upstream Docker setup
@@ -114,9 +114,20 @@ cp .env.example .env
 2. Set at least these values in `.env`:
 
 ```env
+AI_PROVIDER=openai
 OPENAI_API_KEY=your_openai_api_key
 PORT=3000
 ```
+
+Or switch both planner and worker to Codex CLI:
+
+```env
+AI_PROVIDER=codex_cli
+CODEX_MODEL=gpt-5
+PORT=3000
+```
+
+When `AI_PROVIDER=codex_cli`, make sure the Codex CLI is installed and already authenticated. `OPENAI_API_KEY` is only required for `AI_PROVIDER=openai`.
 
 3. Build and start the full stack:
 
@@ -131,6 +142,8 @@ This starts:
 
 Docker sets `REDIS_URL` and `QUEUE_NAME` internally, so they do not need to be present in `.env`.
 Docker also mounts the host Docker socket into the `app` container so the backend can provision Shopware branches with Docker Compose.
+The Docker image also installs the Codex CLI, so you can switch to `AI_PROVIDER=codex_cli` without rebuilding your own tooling layer.
+`docker-compose.yml` also mounts `${HOME}/.codex` into the container and sets `CODEX_HOME=/root/.codex`, so the container can reuse the same Codex Desktop login/session from your host machine.
 
 The API is then reachable at `http://localhost:3000`.
 
@@ -191,7 +204,7 @@ Response:
 
 ### `POST /run-test-from-issue/stream`
 
-Starts an issue-based run and streams newline-delimited JSON events for:
+Starts an input-based run and streams newline-delimited JSON events for:
 
 - issue loading
 - plan generation
@@ -207,20 +220,20 @@ curl -N -X POST http://localhost:3000/run-test-from-issue/stream \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/x-ndjson' \
   -d '{
-    "issueUrl": "https://github.com/shopware/shopware/issues/15805",
+    "input": "https://github.com/shopware/shopware/issues/15805",
     "branch": "trunk"
   }'
 ```
 
 ### `POST /run-test-from-issue`
 
-Creates a Shopware Administration test job from a GitHub issue URL plus an optional Shopware branch.
+Creates a Shopware Administration test job from either a GitHub issue/PR URL or a freeform scenario, plus an optional Shopware branch.
 
 Request:
 
 ```json
 {
-  "issueUrl": "https://github.com/shopware/shopware/issues/15805",
+  "input": "https://github.com/shopware/shopware/issues/15805",
   "branch": "trunk"
 }
 ```
@@ -316,13 +329,22 @@ Check status:
 curl http://localhost:3000/run-test/<jobId>
 ```
 
-Queue a test from a GitHub issue:
+Queue a test from GitHub or free text:
 
 ```bash
 curl -X POST http://localhost:3000/run-test-from-issue \
   -H 'Content-Type: application/json' \
   -d '{
-    "issueUrl": "https://github.com/shopware/shopware/issues/15805",
+    "input": "https://github.com/shopware/shopware/issues/15805",
+    "branch": "trunk"
+  }'
+```
+
+```bash
+curl -X POST http://localhost:3000/run-test-from-issue \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "input": "Log into the administration, open profile settings, and verify that the profile image is visible.",
     "branch": "trunk"
   }'
 ```
@@ -350,6 +372,14 @@ Run a test from a GitHub issue:
 ```bash
 run-test \
   --issueUrl https://github.com/shopware/shopware/issues/15805 \
+  --serviceUrl http://localhost:3000
+```
+
+Run a test from free text:
+
+```bash
+run-test \
+  --input "Log into the administration, open profile settings, and verify that the profile image is visible." \
   --serviceUrl http://localhost:3000
 ```
 
@@ -461,12 +491,12 @@ The UI backend also returns CORS headers for `/api`, so direct cross-origin call
 
 ### UI flow
 
-- Paste a GitHub issue URL into the large input field
+- Paste a GitHub issue/PR URL or a freeform scenario into the large input field
 - Select a Shopware branch, defaulting to `trunk`
 - Press `Enter`
 - The Vue app streams a live feed from the Next.js backend
 - The Next.js backend loads Shopware branches from the browser-agent service
-- The browser-agent service checks out the selected `shopware/shopware` branch, starts Shopware via Docker Compose, runs `composer setup`, starts `composer watch:admin`, and then executes the issue-driven QA run
+- The browser-agent service checks out the selected `shopware/shopware` branch, starts Shopware via Docker Compose, runs `composer setup`, starts `composer watch:admin`, and then executes the input-driven QA run
 - The UI sidebar shows pending, preparing, running, and recent finished tasks
 - You can switch between tasks, stop tasks, remove individual finished tasks, or clear all finished tasks at once
 - Browser execution messages include per-step screenshots with a larger preview on click
@@ -477,6 +507,8 @@ The UI backend also returns CORS headers for `/api`, so direct cross-origin call
 - Each job is capped at 20 agent steps.
 - Each job times out after 300 seconds by default.
 - Queue retries are configured for 2 retries after the initial attempt.
+- `AI_PROVIDER=openai` uses the OpenAI API directly.
+- `AI_PROVIDER=codex_cli` routes planner and worker prompts through `codex exec`. In Docker, the `app` service reuses your host `${HOME}/.codex` session automatically. Outside Docker, install Codex CLI with `npm i -g @openai/codex` and authenticate it first.
 - The worker returns structured JSON with `success`, `summary`, `steps`, and `logs`.
 - Shopware provisioning is based on the upstream `shopware/shopware` Docker workflow documented in `CONTRIBUTING.md`, including `docker compose up -d`, `composer setup`, and `composer watch:admin`.
 - `browser-use` requires Python 3.11+, so installation will fail on older Python versions such as 3.9.

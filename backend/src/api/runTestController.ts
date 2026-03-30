@@ -2,8 +2,8 @@ import type { Request, Response } from 'express';
 import { browserTestQueue, enqueueBrowserTest } from '../queue/queue';
 import { config } from '../config';
 import { logger } from '../logger';
-import { getGitHubIssueSummary } from '../services/githubIssue';
-import { deriveTestPlanFromIssue } from '../services/issueTestPlanner';
+import { getGitHubIssueSummary, isGitHubReferenceUrl } from '../services/githubIssue';
+import { deriveTestPlanFromIssue, deriveTestPlanFromScenario } from '../services/issueTestPlanner';
 import { listShopwareBranches } from '../services/shopwareBranches';
 import { prepareShopwareAdministration } from '../services/shopwareProvisioner';
 import {
@@ -60,25 +60,18 @@ const parseIssueRequestBody = (
     return { error: 'Request body must be a JSON object.' };
   }
 
+  const input = typeof body.input === 'string' ? body.input.trim() : '';
   const issueUrl = typeof body.issueUrl === 'string' ? body.issueUrl.trim() : '';
   const branch = typeof body.branch === 'string' ? body.branch.trim() : config.shopwareDefaultBranch;
+  const normalizedInput = input || issueUrl;
 
-  if (!issueUrl) {
-    return { error: 'Field "issueUrl" is required.' };
-  }
-
-  try {
-    const parsedIssueUrl = new URL(issueUrl);
-    if (parsedIssueUrl.hostname !== 'github.com') {
-      return { error: 'Field "issueUrl" must point to github.com.' };
-    }
-  } catch {
-    return { error: 'Field "issueUrl" must be a valid absolute URL.' };
+  if (!normalizedInput) {
+    return { error: 'Field "input" is required.' };
   }
 
   return {
     data: {
-      issueUrl,
+      input: normalizedInput,
       branch,
     },
   };
@@ -97,6 +90,7 @@ const sleep = async (ms: number): Promise<void> =>
   });
 
 const toIssueReference = (issue: Awaited<ReturnType<typeof getGitHubIssueSummary>>) => ({
+  kind: issue.kind,
   url: issue.url,
   title: issue.title,
   repository: issue.repository,
@@ -108,6 +102,9 @@ const createProgressEvent = (event: ProgressEventPayload): RunTestFromIssueStrea
   timestamp: event.timestamp ?? new Date().toISOString(),
   ...event,
 });
+
+const truncate = (value: string, limit = 120): string =>
+  value.length <= limit ? value : `${value.slice(0, limit - 3).trimEnd()}...`;
 
 const deriveExposedStatus = (state: string, result?: RunTestResult, cancellationRequested?: boolean): string => {
   if (state === 'completed' && result?.metadata?.cancelled) {
@@ -142,38 +139,65 @@ const normalizeProgress = (value: unknown): ProgressEventPayload | undefined => 
   };
 };
 
-const queueIssueRun = async (
+const queueInputRun = async (
   data: RunTestFromIssueRequestBody,
   onEvent?: (event: RunTestFromIssueStreamEvent) => void,
 ) => {
   const branch = data.branch?.trim() || config.shopwareDefaultBranch;
+  const input = data.input.trim();
+  const isGitHubInput = isGitHubReferenceUrl(input);
   const queuedHistoryEvents: RunTestFromIssueStreamEvent[] = [];
   const emit = (event: RunTestFromIssueStreamEvent) => {
     queuedHistoryEvents.push(event);
     onEvent?.(event);
   };
 
-  emit(
-    createProgressEvent({
-      stage: 'issue',
-      message: 'Fetching GitHub issue details.',
-      detail: data.issueUrl,
-    }),
-  );
-  const issue = await getGitHubIssueSummary(data.issueUrl);
+  let sourceKind: 'issue' | 'pull_request' | 'scenario' = 'scenario';
+  let sourceUrl: string | undefined;
+  let sourceTitle = truncate(input);
+  let sourceRepository: string | undefined;
+  let plan:
+    | Awaited<ReturnType<typeof deriveTestPlanFromIssue>>
+    | Awaited<ReturnType<typeof deriveTestPlanFromScenario>>;
 
-  emit({
-    type: 'issue',
-    issue: toIssueReference(issue),
-  });
+  if (isGitHubInput) {
+    emit(
+      createProgressEvent({
+        stage: 'issue',
+        message: 'Fetching GitHub issue details.',
+        detail: input,
+      }),
+    );
+    const issue = await getGitHubIssueSummary(input);
 
-  emit(
-    createProgressEvent({
-      stage: 'planning',
-      message: 'Generating a browser test plan from the GitHub issue.',
-    }),
-  );
-  const plan = await deriveTestPlanFromIssue(issue);
+    sourceKind = issue.kind;
+    sourceUrl = issue.url;
+    sourceTitle = issue.title;
+    sourceRepository = issue.repository;
+
+    emit({
+      type: 'issue',
+      issue: toIssueReference(issue),
+    });
+
+    emit(
+      createProgressEvent({
+        stage: 'planning',
+        message: `Generating a browser test plan from the GitHub ${issue.kind === 'pull_request' ? 'pull request' : 'issue'}.`,
+      }),
+    );
+    plan = await deriveTestPlanFromIssue(issue);
+  } else {
+    emit(
+      createProgressEvent({
+        stage: 'planning',
+        message: 'Interpreting the pasted scenario.',
+        detail: truncate(input, 240),
+      }),
+    );
+    plan = await deriveTestPlanFromScenario(input);
+    sourceTitle = plan.summary || truncate(input);
+  }
 
   emit({
     type: 'plan',
@@ -211,9 +235,11 @@ const queueIssueRun = async (
     timeoutSeconds: config.jobTimeoutSeconds,
     submittedAt: new Date().toISOString(),
     source: {
-      issueUrl: issue.url,
-      issueTitle: issue.title,
-      repository: issue.repository,
+      kind: sourceKind,
+      input,
+      url: sourceUrl,
+      title: sourceTitle,
+      repository: sourceRepository,
     },
     shopware: {
       branch: shopware.branch,
@@ -231,9 +257,10 @@ const queueIssueRun = async (
       jobId: job.id,
       branch: payload.branch,
       adminUrl: payload.url,
-      issueUrl: issue.url,
+      sourceKind,
+      sourceUrl,
     },
-    'Queued Shopware browser test job from GitHub issue',
+    'Queued Shopware browser test job from structured input',
   );
 
   const response = {
@@ -241,7 +268,20 @@ const queueIssueRun = async (
     status: 'queued',
     branch: payload.branch,
     adminUrl: payload.url,
-    issue: toIssueReference(issue),
+    issue:
+      sourceKind === 'scenario'
+        ? undefined
+        : {
+            kind: sourceKind,
+            url: sourceUrl ?? input,
+            title: sourceTitle,
+            repository: sourceRepository ?? '',
+            number:
+              Number((sourceUrl ?? input).match(/\/(?:issues|pull)\/(\d+)(?:\/|$)/)?.[1] ?? Number.NaN) || 0,
+          },
+    sourceKind: isGitHubInput ? 'github' : 'scenario',
+    sourceInput: input,
+    sourceTitle,
     generatedTask: plan.task,
     generatedSteps: plan.steps,
     summary: plan.summary,
@@ -316,7 +356,7 @@ export const runTestFromIssue = async (req: Request, res: Response): Promise<voi
     return;
   }
 
-  const response = await queueIssueRun(parsed.data);
+  const response = await queueInputRun(parsed.data);
 
   res.status(202).json(response);
 };
@@ -354,17 +394,19 @@ export const runTestFromIssueStream = async (req: Request, res: Response): Promi
 
   push({
     type: 'accepted',
-    issueUrl: parsed.data.issueUrl,
+    input: parsed.data.input,
+    sourceKind: isGitHubReferenceUrl(parsed.data.input) ? 'github' : 'scenario',
     branch: parsed.data.branch?.trim() || config.shopwareDefaultBranch,
     timestamp: new Date().toISOString(),
   });
 
   try {
-    const queuedRun = await queueIssueRun(parsed.data, push);
+    const queuedRun = await queueInputRun(parsed.data, push);
     await appendTaskHistoryEvents(String(queuedRun.jobId), [
       {
         type: 'accepted',
-        issueUrl: parsed.data.issueUrl,
+        input: parsed.data.input,
+        sourceKind: isGitHubReferenceUrl(parsed.data.input) ? 'github' : 'scenario',
         branch: parsed.data.branch?.trim() || config.shopwareDefaultBranch,
         timestamp: new Date().toISOString(),
       },

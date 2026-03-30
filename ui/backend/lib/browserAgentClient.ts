@@ -5,7 +5,11 @@ export interface RunFromIssueResponse {
   status: string;
   branch: string;
   adminUrl: string;
-  issue: {
+  sourceKind: 'github' | 'scenario';
+  sourceInput: string;
+  sourceTitle: string;
+  issue?: {
+    kind: 'issue' | 'pull_request';
     url: string;
     title: string;
     repository: string;
@@ -59,6 +63,8 @@ export interface ManagedTaskSummaryResponse {
   jobId: string;
   status: string;
   attemptsMade: number;
+  sourceKind?: 'issue' | 'pull_request' | 'scenario';
+  sourceInput?: string;
   branch?: string;
   issueUrl?: string;
   issueTitle?: string;
@@ -75,12 +81,19 @@ export interface ManagedTaskSummaryResponse {
 export interface ManagedTaskListResponse {
   running: ManagedTaskSummaryResponse[];
   pending: ManagedTaskSummaryResponse[];
+  recent: ManagedTaskSummaryResponse[];
 }
 
 export interface StopTaskResult {
   jobId: string;
   action: 'removed' | 'cancellation_requested';
   previousStatus: string;
+  message: string;
+}
+
+export interface ClearFinishedTasksResult {
+  clearedJobIds: string[];
+  removedCount: number;
   message: string;
 }
 
@@ -111,7 +124,7 @@ export const listShopwareBranches = async (query?: string): Promise<ShopwareBran
   return readJson<ShopwareBranchResponse>(response);
 };
 
-export const queueIssueRun = async (issueUrl: string, branch: string): Promise<RunFromIssueResponse> => {
+export const queueIssueRun = async (input: string, branch: string): Promise<RunFromIssueResponse> => {
   const response = await fetch(`${backendConfig.browserAgentServiceUrl}/run-test-from-issue`, {
     method: 'POST',
     headers: {
@@ -119,7 +132,7 @@ export const queueIssueRun = async (issueUrl: string, branch: string): Promise<R
     },
     body: JSON.stringify({
       branch,
-      issueUrl,
+      input,
     }),
     cache: 'no-store',
   });
@@ -127,7 +140,7 @@ export const queueIssueRun = async (issueUrl: string, branch: string): Promise<R
   return readJson<RunFromIssueResponse>(response);
 };
 
-export const streamIssueRun = async (issueUrl: string, branch: string): Promise<Response> =>
+export const streamIssueRun = async (input: string, branch: string): Promise<Response> =>
   fetch(`${backendConfig.browserAgentServiceUrl}/run-test-from-issue/stream`, {
     method: 'POST',
     headers: {
@@ -136,7 +149,7 @@ export const streamIssueRun = async (issueUrl: string, branch: string): Promise<
     },
     body: JSON.stringify({
       branch,
-      issueUrl,
+      input,
     }),
     cache: 'no-store',
   });
@@ -177,4 +190,16 @@ export const stopManagedTask = async (jobId: string): Promise<StopTaskResult> =>
   });
 
   return readJson<StopTaskResult>(response);
+};
+
+export const clearFinishedManagedTasks = async (): Promise<ClearFinishedTasksResult> => {
+  const response = await fetch(`${backendConfig.browserAgentServiceUrl}/tasks/clear-finished`, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+    },
+    cache: 'no-store',
+  });
+
+  return readJson<ClearFinishedTasksResult>(response);
 };

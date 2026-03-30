@@ -12,6 +12,7 @@ from browser_use import Agent, Browser, ChatOpenAI
 from bullmq import Worker
 from dotenv import load_dotenv
 from redis.asyncio import Redis
+from codex_cli_adapter import CodexCliChatModel
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -26,9 +27,25 @@ logging.basicConfig(
 logger = logging.getLogger("browser-test-worker")
 
 
+def load_additional_ai_context() -> str:
+    candidates = [ROOT_DIR / "ai-context.md", Path.cwd() / "ai-context.md"]
+    for candidate in candidates:
+        try:
+            return candidate.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+    return ""
+
+
 QUEUE_NAME = os.getenv("QUEUE_NAME", "browser-tests")
 REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379")
+AI_PROVIDER = os.getenv("AI_PROVIDER", "openai").strip().lower()
+if AI_PROVIDER == "codex":
+    AI_PROVIDER = "codex_cli"
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "o3")
+CODEX_MODEL = os.getenv("CODEX_MODEL", "gpt-5")
+CODEX_CLI_PATH = os.getenv("CODEX_CLI_PATH", "codex")
+CODEX_CLI_TIMEOUT_SECONDS = int(os.getenv("CODEX_CLI_TIMEOUT_SECONDS", "180"))
 JOB_TIMEOUT_SECONDS = int(os.getenv("JOB_TIMEOUT_SECONDS", "120"))
 AGENT_MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "20"))
 CANCELLATION_TTL_SECONDS = 24 * 60 * 60
@@ -43,6 +60,8 @@ QA_INSTRUCTIONS = """You are an autonomous QA agent for the Shopware Administrat
 * Verify results using both DOM and visual cues
 * Stop when the goal is achieved or impossible
 """
+
+ADDITIONAL_AI_CONTEXT = load_additional_ai_context()
 
 
 class TaskCancellationRequested(Exception):
@@ -121,7 +140,11 @@ def build_prompt(url: str, task: str, shopware_context: dict[str, Any] | None) -
     admin_username = stringify((shopware_context or {}).get("adminUsername")) or "admin"
     admin_password = stringify((shopware_context or {}).get("adminPassword")) or "shopware"
 
-    return f"""{QA_INSTRUCTIONS}
+    additional_context_block = (
+        f"\nAdditional context:\n{ADDITIONAL_AI_CONTEXT}\n" if ADDITIONAL_AI_CONTEXT else "\n"
+    )
+
+    return f"""{QA_INSTRUCTIONS}{additional_context_block}
 
 Target application: Shopware Administration
 Branch under test: {branch}
@@ -136,6 +159,18 @@ Important:
 - Prefer the Shopware administration credentials above whenever authentication is required.
 - The final answer must clearly say whether the requested check passed or failed and why.
 """
+
+
+def build_llm() -> Any:
+    if AI_PROVIDER == "codex_cli":
+        return CodexCliChatModel(
+            model=CODEX_MODEL,
+            cli_path=CODEX_CLI_PATH,
+            cwd=str(ROOT_DIR),
+            timeout_seconds=CODEX_CLI_TIMEOUT_SECONDS,
+        )
+
+    return ChatOpenAI(model=OPENAI_MODEL)
 
 
 async def capture_current_url(agent: Agent) -> str | None:
@@ -276,6 +311,88 @@ def normalize_errors(history: Any) -> list[str]:
     return errors
 
 
+def infer_reproducibility_gaps(task: str) -> list[str]:
+    task_lower = task.lower()
+    gaps: list[str] = []
+
+    if "settings" in task_lower and "shop settings" not in task_lower and "profile settings" not in task_lower:
+        gaps.append(
+            'Specify whether "Settings" means Shop settings, Profile settings, or another settings area.'
+        )
+
+    if not any(
+        marker in task_lower
+        for marker in [
+            "customer",
+            "order",
+            "product",
+            "profile",
+            "sales channel",
+            "category",
+            "promotion",
+            "rule",
+            "plugin",
+            "app",
+            "theme",
+            "cms",
+        ]
+    ):
+        gaps.append("Name the exact page, module, or entity that should be opened during reproduction.")
+
+    if '"' not in task and "'" not in task and not any(char.isdigit() for char in task):
+        gaps.append("Include concrete test data such as field values, entity names, or identifiers to use.")
+
+    if not any(
+        marker in task_lower
+        for marker in [
+            "success message",
+            "error message",
+            "toast",
+            "notification",
+            "visible",
+            "persist",
+            "saved",
+            "404",
+            "validation",
+            "disabled",
+            "enabled",
+        ]
+    ):
+        gaps.append("Describe the exact observable outcome that proves the bug is reproduced or fixed.")
+
+    if not any(
+        marker in task_lower
+        for marker in [
+            "before",
+            "after",
+            "precondition",
+            "existing",
+            "already",
+            "feature flag",
+            "plugin",
+            "extension",
+            "permission",
+            "role",
+        ]
+    ):
+        gaps.append("Mention any required preconditions such as existing data, permissions, or feature flags.")
+
+    return gaps[:4]
+
+
+def append_reproducibility_feedback(summary: str, task: str) -> str:
+    gaps = infer_reproducibility_gaps(task)
+    if not gaps:
+        return summary
+
+    bullet_list = "\n".join(f"- {gap}" for gap in gaps)
+    return (
+        f"{summary}\n\n"
+        "Potential missing information for reliable reproduction:\n"
+        f"{bullet_list}"
+    )
+
+
 async def publish_execution_progress(
     job: Any,
     *,
@@ -350,7 +467,7 @@ async def run_browser_task(job: Any, job_data: dict[str, Any], job_id: str) -> d
 
     try:
         await ensure_not_cancelled(job_id)
-        llm = ChatOpenAI(model=OPENAI_MODEL)
+        llm = build_llm()
         agent = Agent(
             task=build_prompt(url, task, shopware_context),
             llm=llm,
@@ -455,9 +572,19 @@ async def run_browser_task(job: Any, job_data: dict[str, Any], job_id: str) -> d
                 final_url = None
 
         summary = stringify(final_result) or "The agent finished without a final summary."
+        success = bool(success_value) if success_value is not None else not errors
+        step_limit_reached = bool(steps) and len(steps) >= max_steps and not success
+
+        if step_limit_reached:
+            summary = append_reproducibility_feedback(summary, task)
 
         if errors:
             logs.extend([f"Error: {error}" for error in errors])
+
+        if step_limit_reached:
+            logs.append("The agent reached the configured step limit before confidently completing the goal.")
+            for gap in infer_reproducibility_gaps(task):
+                logs.append(f"Missing reproducibility detail: {gap}")
 
         await emit_progress(
             "Browser run finished.",
@@ -466,7 +593,7 @@ async def run_browser_task(job: Any, job_data: dict[str, Any], job_id: str) -> d
         )
 
         return {
-            "success": bool(success_value) if success_value is not None else not errors,
+            "success": success,
             "summary": summary,
             "steps": steps,
             "logs": logs,
@@ -475,6 +602,7 @@ async def run_browser_task(job: Any, job_data: dict[str, Any], job_id: str) -> d
                 "durationSeconds": duration_seconds,
                 "finalUrl": final_url,
                 "branch": stringify((shopware_context or {}).get("branch")) or None,
+                "stepLimitReached": step_limit_reached,
             },
         }
     finally:
@@ -582,7 +710,7 @@ async def process_job(job: Any, _job_token: str) -> dict[str, Any]:
 
 
 async def main() -> None:
-    if not os.getenv("OPENAI_API_KEY"):
+    if AI_PROVIDER == "openai" and not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("OPENAI_API_KEY is required to start the worker.")
 
     shutdown_event = asyncio.Event()

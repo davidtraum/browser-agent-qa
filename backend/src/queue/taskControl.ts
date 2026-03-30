@@ -158,8 +158,10 @@ const buildTaskSummary = async (job: Job<RunTestJobData, RunTestResult>): Promis
           ? result.success
           : undefined,
     branch: job.data.branch || job.data.shopware?.branch,
-    issueUrl: job.data.source?.issueUrl,
-    issueTitle: job.data.source?.issueTitle,
+    sourceKind: job.data.source?.kind,
+    sourceInput: job.data.source?.input,
+    issueUrl: job.data.source?.url,
+    issueTitle: job.data.source?.title,
     repository: job.data.source?.repository,
     adminUrl: job.data.shopware?.adminUrl || job.data.url,
     submittedAt: job.data.submittedAt,

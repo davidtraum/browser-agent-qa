@@ -1,7 +1,8 @@
 export type FeedEvent =
   | {
       type: 'accepted';
-      issueUrl: string;
+      input: string;
+      sourceKind: 'github' | 'scenario';
       branch: string;
       timestamp: string;
     }
@@ -29,6 +30,7 @@ export type FeedEvent =
   | {
       type: 'issue';
       issue: {
+        kind: 'issue' | 'pull_request';
         url: string;
         title: string;
         repository: string;
@@ -111,6 +113,8 @@ export interface ManagedTaskSummary {
   status: string;
   attemptsMade: number;
   resultSuccess?: boolean;
+  sourceKind?: 'issue' | 'pull_request' | 'scenario';
+  sourceInput?: string;
   branch?: string;
   issueUrl?: string;
   issueTitle?: string;

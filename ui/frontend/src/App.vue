@@ -46,8 +46,10 @@ const taskRefreshHandle = ref<number | null>(null);
 const selectedTaskRefreshHandle = ref<number | null>(null);
 const selectedTaskResultSignature = ref('');
 const selectedTaskLastSequence = ref(0);
+const optimisticTaskId = ref('');
 
 let activeController: AbortController | null = null;
+const OPTIMISTIC_TASK_PREFIX = 'local:';
 
 const statusLabel = computed(() => {
   if (currentStatus.value === 'idle') {
@@ -69,7 +71,10 @@ const timelineItemFromEvent = (event: FeedEvent): Omit<TimelineItem, 'id'> | nul
     case 'accepted':
       return {
         label: 'Request accepted',
-        detail: `Preparing Shopware branch ${event.branch} for ${event.issueUrl}.`,
+        detail:
+          event.sourceKind === 'github'
+            ? `Preparing Shopware branch ${event.branch} for the linked GitHub reference.`
+            : `Preparing Shopware branch ${event.branch} for the pasted scenario.`,
         tone: 'info',
       };
     case 'progress':
@@ -81,7 +86,7 @@ const timelineItemFromEvent = (event: FeedEvent): Omit<TimelineItem, 'id'> | nul
       };
     case 'issue':
       return {
-        label: 'Issue analyzed',
+        label: event.issue.kind === 'pull_request' ? 'PR analyzed' : 'Issue analyzed',
         detail: event.issue.title,
         tone: 'info',
       };
@@ -178,6 +183,72 @@ const findManagedTask = (taskId: string): ManagedTaskSummary | undefined =>
     (task) => task.jobId === taskId,
   );
 
+const removeManagedTask = (taskId: string) => {
+  managedTasks.value = {
+    running: managedTasks.value.running.filter((task) => task.jobId !== taskId),
+    pending: managedTasks.value.pending.filter((task) => task.jobId !== taskId),
+    recent: managedTasks.value.recent.filter((task) => task.jobId !== taskId),
+  };
+};
+
+const isOptimisticTask = (taskId: string) => taskId.startsWith(OPTIMISTIC_TASK_PREFIX);
+
+const getTaskFromList = (tasks: ManagedTaskList, taskId: string): ManagedTaskSummary | undefined =>
+  [...tasks.running, ...tasks.pending, ...tasks.recent].find((task) => task.jobId === taskId);
+
+const sortTasksByNewest = (tasks: ManagedTaskSummary[]) =>
+  [...tasks].sort((left, right) => {
+    const leftTime = Date.parse(left.submittedAt ?? left.createdAt ?? left.processedAt ?? left.finishedAt ?? '') || 0;
+    const rightTime =
+      Date.parse(right.submittedAt ?? right.createdAt ?? right.processedAt ?? right.finishedAt ?? '') || 0;
+    return rightTime - leftTime;
+  });
+
+const mergeManagedTask = (incoming: ManagedTaskSummary) => {
+  const existing = findManagedTask(incoming.jobId);
+  const merged: ManagedTaskSummary = {
+    ...existing,
+    ...incoming,
+    sourceKind: incoming.sourceKind ?? existing?.sourceKind,
+    sourceInput: incoming.sourceInput ?? existing?.sourceInput,
+    issueTitle: incoming.issueTitle ?? existing?.issueTitle,
+    issueUrl: incoming.issueUrl ?? existing?.issueUrl,
+    repository: incoming.repository ?? existing?.repository,
+    adminUrl: incoming.adminUrl ?? existing?.adminUrl,
+    branch: incoming.branch ?? existing?.branch,
+    progress: incoming.progress ?? existing?.progress,
+    attemptsMade: incoming.attemptsMade ?? existing?.attemptsMade ?? 0,
+  };
+
+  const nextRunning = managedTasks.value.running.filter((task) => task.jobId !== incoming.jobId);
+  const nextPending = managedTasks.value.pending.filter((task) => task.jobId !== incoming.jobId);
+  const nextRecent = managedTasks.value.recent.filter((task) => task.jobId !== incoming.jobId);
+
+  if (merged.status === 'completed' || merged.status === 'failed' || merged.status === 'cancelled') {
+    managedTasks.value = {
+      running: sortTasksByNewest(nextRunning),
+      pending: sortTasksByNewest(nextPending),
+      recent: sortTasksByNewest([merged, ...nextRecent]),
+    };
+    return;
+  }
+
+  if (merged.status === 'waiting' || merged.status === 'prioritized' || merged.status === 'delayed') {
+    managedTasks.value = {
+      running: sortTasksByNewest(nextRunning),
+      pending: sortTasksByNewest([merged, ...nextPending]),
+      recent: sortTasksByNewest(nextRecent),
+    };
+    return;
+  }
+
+  managedTasks.value = {
+    running: sortTasksByNewest([merged, ...nextRunning]),
+    pending: sortTasksByNewest(nextPending),
+    recent: sortTasksByNewest(nextRecent),
+  };
+};
+
 const describeTaskState = (task: ManagedTaskSummary) => {
   if (task.status === 'waiting' || task.status === 'prioritized' || task.status === 'delayed') {
     return {
@@ -188,6 +259,7 @@ const describeTaskState = (task: ManagedTaskSummary) => {
   }
 
   if (
+    task.status === 'starting' ||
     task.status === 'active' ||
     task.status === 'cancelling' ||
     (task.status === 'completed' && typeof task.resultSuccess !== 'boolean')
@@ -282,9 +354,40 @@ const formatProgressLabel = (
   }
 };
 
+const extractGitHubReference = (url?: string): string => {
+  if (!url) {
+    return '';
+  }
+
+  const match = url.match(/github\.com\/[^/]+\/[^/]+\/(issues|pull)\/(\d+)/i);
+  if (!match) {
+    return '';
+  }
+
+  const [, kind, number] = match;
+  return kind.toLowerCase() === 'pull' ? `PR #${number}` : `#${number}`;
+};
+
+const isGitHubReference = (value?: string): boolean => Boolean(extractGitHubReference(value));
+
+const formatTaskMeta = (task: ManagedTaskSummary): string => {
+  const parts = [task.branch || 'trunk'];
+  const reference = extractGitHubReference(task.issueUrl);
+
+  if (reference) {
+    parts.push(reference);
+  } else if (task.sourceKind === 'scenario') {
+    parts.push('Scenario');
+  }
+
+  parts.push(task.status);
+  return parts.join(' · ');
+};
+
 const resetState = () => {
   errorMessage.value = '';
   currentJobId.value = '';
+  optimisticTaskId.value = '';
   currentStatus.value = 'starting';
   issueTitle.value = '';
   issueMeta.value = '';
@@ -308,6 +411,7 @@ const returnToStartScreen = () => {
   isRunning.value = false;
   errorMessage.value = '';
   currentJobId.value = '';
+  optimisticTaskId.value = '';
   currentStatus.value = 'idle';
   issueTitle.value = '';
   issueMeta.value = '';
@@ -356,33 +460,108 @@ watch(
 );
 
 const applyEvent = (event: FeedEvent) => {
+  const activeTaskId = currentJobId.value || optimisticTaskId.value;
+
   switch (event.type) {
     case 'accepted':
       currentActivity.value = `Preparing Shopware branch ${event.branch}.`;
+      optimisticTaskId.value = `${OPTIMISTIC_TASK_PREFIX}${event.timestamp}`;
+      mergeManagedTask({
+        jobId: optimisticTaskId.value,
+        status: 'active',
+        attemptsMade: 0,
+        sourceKind: event.sourceKind === 'github' ? 'issue' : 'scenario',
+        sourceInput: event.input,
+        branch: event.branch,
+        issueUrl: event.sourceKind === 'github' ? event.input : undefined,
+        issueTitle: issueTitle.value,
+        repository: issueMeta.value,
+        submittedAt: new Date().toISOString(),
+        progress: {
+          stage: 'branch',
+          message: `Preparing Shopware branch ${event.branch}.`,
+          timestamp: event.timestamp,
+        },
+      });
       break;
     case 'progress':
       currentActivity.value = event.detail ? `${event.message} ${event.detail}` : event.message;
+      if (activeTaskId) {
+        mergeManagedTask({
+          jobId: activeTaskId,
+          status: event.stage === 'execution' ? 'active' : currentStatus.value || 'active',
+          attemptsMade: findManagedTask(activeTaskId)?.attemptsMade ?? 0,
+          sourceInput: submittedIssueUrl.value,
+          branch: currentBranch.value,
+          issueUrl: isGitHubReference(submittedIssueUrl.value) ? submittedIssueUrl.value : undefined,
+          issueTitle: issueTitle.value,
+          repository: issueMeta.value,
+          adminUrl: currentAdminUrl.value,
+          progress: event,
+        });
+      }
       break;
     case 'issue':
       issueTitle.value = event.issue.title;
-      issueMeta.value = `${event.issue.repository} · #${event.issue.number}`;
+      issueMeta.value = `${event.issue.repository} · ${
+        event.issue.kind === 'pull_request' ? `PR #${event.issue.number}` : `#${event.issue.number}`
+      }`;
       break;
     case 'plan':
       planSummary.value = event.summary;
       generatedTask.value = event.generatedTask;
       generatedSteps.value = event.generatedSteps;
+      if (!issueTitle.value) {
+        issueTitle.value = event.summary;
+      }
+      if (!issueMeta.value) {
+        issueMeta.value = isGitHubReference(submittedIssueUrl.value) ? 'GitHub reference' : 'Freeform scenario';
+      }
       break;
     case 'job':
+      if (optimisticTaskId.value) {
+        removeManagedTask(optimisticTaskId.value);
+      }
       currentJobId.value = event.jobId;
+      optimisticTaskId.value = '';
       selectedTaskId.value = event.jobId;
       resetSelectedTaskSignatures();
       currentBranch.value = event.branch;
       currentAdminUrl.value = event.adminUrl;
       currentActivity.value = `Worker ${event.jobId} is running against Shopware branch ${event.branch}.`;
+      mergeManagedTask({
+        jobId: event.jobId,
+        status: 'waiting',
+        attemptsMade: 0,
+        sourceInput: submittedIssueUrl.value,
+        sourceKind: isGitHubReference(submittedIssueUrl.value) ? 'issue' : 'scenario',
+        branch: event.branch,
+        issueUrl: isGitHubReference(submittedIssueUrl.value) ? submittedIssueUrl.value : undefined,
+        issueTitle: issueTitle.value,
+        repository: issueMeta.value,
+        adminUrl: event.adminUrl,
+        submittedAt: new Date().toISOString(),
+      });
+      void loadTasks({ silent: true });
       break;
     case 'status':
       currentStatus.value = event.status;
       currentActivity.value = `Worker status is now ${event.status} on attempt ${event.attemptsMade}.`;
+      if (currentJobId.value) {
+        mergeManagedTask({
+          jobId: currentJobId.value,
+          status: event.status,
+          attemptsMade: event.attemptsMade,
+          sourceInput: submittedIssueUrl.value,
+          sourceKind: isGitHubReference(submittedIssueUrl.value) ? 'issue' : 'scenario',
+          branch: currentBranch.value,
+          issueUrl: isGitHubReference(submittedIssueUrl.value) ? submittedIssueUrl.value : undefined,
+          issueTitle: issueTitle.value,
+          repository: issueMeta.value,
+          adminUrl: currentAdminUrl.value,
+          progress: findManagedTask(currentJobId.value)?.progress,
+        });
+      }
       break;
     case 'result':
       resultSuccess.value = event.result.success;
@@ -391,6 +570,22 @@ const applyEvent = (event: FeedEvent) => {
       resultLogs.value = event.result.logs;
       currentStatus.value = event.result.success ? 'completed' : 'failed';
       currentActivity.value = event.result.summary;
+      if (currentJobId.value) {
+        mergeManagedTask({
+          jobId: currentJobId.value,
+          status: event.result.success ? 'completed' : 'failed',
+          attemptsMade: findManagedTask(currentJobId.value)?.attemptsMade ?? 0,
+          resultSuccess: event.result.success,
+          sourceInput: submittedIssueUrl.value,
+          sourceKind: isGitHubReference(submittedIssueUrl.value) ? 'issue' : 'scenario',
+          branch: currentBranch.value,
+          issueUrl: isGitHubReference(submittedIssueUrl.value) ? submittedIssueUrl.value : undefined,
+          issueTitle: issueTitle.value,
+          repository: issueMeta.value,
+          adminUrl: currentAdminUrl.value,
+          finishedAt: new Date().toISOString(),
+        });
+      }
       break;
     case 'error':
       errorMessage.value = event.message;
@@ -427,9 +622,9 @@ const applyTaskSnapshot = (
   currentStatus.value = status.status;
   currentBranch.value = task.branch || defaultBranch.value;
   currentAdminUrl.value = task.adminUrl || '';
-  submittedIssueUrl.value = task.issueUrl || '';
+  submittedIssueUrl.value = task.sourceInput || task.issueUrl || '';
   issueTitle.value = issueLabel;
-  issueMeta.value = task.repository || 'Shopware task';
+  issueMeta.value = task.repository || (task.sourceKind === 'scenario' ? 'Freeform scenario' : 'Shopware task');
   taskActionMessage.value = '';
 
   if (status.result) {
@@ -510,7 +705,26 @@ const loadTasks = async (options?: { silent?: boolean }) => {
   }
 
   try {
+    const previousTasks = managedTasks.value;
     managedTasks.value = await fetchTasks();
+
+    if (optimisticTaskId.value) {
+      const optimisticTask = getTaskFromList(previousTasks, optimisticTaskId.value);
+      if (optimisticTask && !findManagedTask(optimisticTaskId.value)) {
+        mergeManagedTask(optimisticTask);
+      }
+    }
+
+    const shouldPreserveCurrentTask =
+      currentJobId.value !== '' &&
+      !['completed', 'failed', 'cancelled', 'idle'].includes(currentStatus.value);
+
+    if (shouldPreserveCurrentTask) {
+      const currentTask = getTaskFromList(previousTasks, currentJobId.value);
+      if (currentTask && !findManagedTask(currentJobId.value)) {
+        mergeManagedTask(currentTask);
+      }
+    }
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : String(error);
   } finally {
@@ -523,8 +737,10 @@ const syncSelectedTask = async (taskId: string, options?: { replaceFeed?: boolea
     jobId: taskId,
     status: currentStatus.value,
     attemptsMade: 0,
+    sourceInput: submittedIssueUrl.value,
+    sourceKind: isGitHubReference(submittedIssueUrl.value) ? 'issue' : 'scenario',
     branch: currentBranch.value,
-    issueUrl: submittedIssueUrl.value,
+    issueUrl: isGitHubReference(submittedIssueUrl.value) ? submittedIssueUrl.value : undefined,
     issueTitle: issueTitle.value,
     repository: issueMeta.value,
     adminUrl: currentAdminUrl.value,
@@ -610,6 +826,7 @@ const submitIssue = async () => {
   activeController = new AbortController();
   isRunning.value = true;
   submittedIssueUrl.value = trimmed;
+  optimisticTaskId.value = '';
   resetState();
 
   try {
@@ -701,11 +918,11 @@ onUnmounted(() => {
         <div class="chat-header">
           <div>
             <p class="panel-kicker">Shopware QA Copilot</p>
-            <h2>{{ issueTitle || 'Start with a GitHub issue URL' }}</h2>
+            <h2>{{ issueTitle || 'Start with a GitHub link or a freeform scenario' }}</h2>
             <p class="muted">
               {{
                 issueMeta ||
-                'Paste a Shopware issue, pick a branch, and the feed will narrate planning, provisioning, and execution.'
+                'Paste a Shopware issue, PR, or plain-text scenario, pick a branch, and the feed will narrate planning, provisioning, and execution.'
               }}
             </p>
           </div>
@@ -719,11 +936,11 @@ onUnmounted(() => {
           <div class="chat-message user-message">
             <div class="message-avatar">You</div>
             <div class="message-bubble user-bubble">
-              <p class="message-label">Issue request</p>
+              <p class="message-label">Scenario input</p>
               <p class="message-body">
                 {{
                   submittedIssueUrl ||
-                  'No issue submitted yet. Paste a GitHub issue URL below and hit Enter to kick off the run.'
+                  'No scenario submitted yet. Paste a GitHub issue or PR URL, or describe the scenario directly, then hit Enter.'
                 }}
               </p>
               <div class="message-tags">
@@ -738,8 +955,8 @@ onUnmounted(() => {
             <div class="message-bubble assistant-bubble">
               <p class="message-label">Live feed ready</p>
               <p class="message-body">
-                I will stream issue analysis, the generated test plan, Shopware provisioning, and the browser run here
-                as a readable conversation.
+                I will stream scenario analysis, the generated test plan, Shopware provisioning, and the browser run
+                here as a readable conversation.
               </p>
             </div>
           </div>
@@ -768,12 +985,12 @@ onUnmounted(() => {
         </div>
 
         <div class="composer composer-docked">
-          <label class="composer-label" for="issue-url">Issue URL</label>
+          <label class="composer-label" for="issue-url">Issue, PR, or scenario</label>
           <textarea
             id="issue-url"
             v-model="issueUrl"
             class="issue-input"
-            placeholder="https://github.com/shopware/shopware/issues/15805"
+            placeholder="https://github.com/shopware/shopware/issues/15805 or: Open profile settings and verify the avatar is visible."
             rows="3"
             :disabled="isRunning"
             @keydown="handleKeydown"
@@ -799,9 +1016,9 @@ onUnmounted(() => {
             </div>
 
             <div class="composer-actions">
-              <p class="hint">Enter sends the issue straight into the live Shopware test flow.</p>
+              <p class="hint">Enter sends the link or scenario straight into the live Shopware test flow.</p>
               <button class="launch-button" type="button" :disabled="isRunning || !issueUrl.trim()" @click="submitIssue">
-                {{ isRunning ? 'Streaming…' : 'Run Issue Check' }}
+                {{ isRunning ? 'Streaming…' : 'Run Scenario Check' }}
               </button>
             </div>
           </div>
@@ -834,7 +1051,12 @@ onUnmounted(() => {
                 class="task-item"
                 :data-selected="selectedTaskId === task.jobId"
               >
-                <button class="task-select" type="button" @click="selectTask(task.jobId)">
+                <button
+                  class="task-select"
+                  type="button"
+                  :disabled="isOptimisticTask(task.jobId)"
+                  @click="selectTask(task.jobId)"
+                >
                   <div class="task-item-heading">
                     <span class="task-state-icon" :data-state="describeTaskState(task).className">
                       {{ describeTaskState(task).icon }}
@@ -842,15 +1064,23 @@ onUnmounted(() => {
                     <span class="task-state-label">{{ describeTaskState(task).label }}</span>
                   </div>
                   <p class="task-item-title">{{ task.issueTitle || `Task ${task.jobId}` }}</p>
-                  <p class="task-item-meta">{{ task.branch || 'trunk' }} · {{ task.status }}</p>
+                  <p class="task-item-meta">{{ formatTaskMeta(task) }}</p>
                 </button>
                 <button
                   class="task-stop"
                   type="button"
-                  :disabled="stoppingTaskId === task.jobId"
+                  :disabled="stoppingTaskId === task.jobId || isOptimisticTask(task.jobId)"
                   @click.stop="stopManagedTaskFromUi(task.jobId)"
                 >
-                  {{ task.cancellationRequested ? 'Stopping…' : stoppingTaskId === task.jobId ? 'Stopping…' : 'Stop' }}
+                  {{
+                    isOptimisticTask(task.jobId)
+                      ? 'Preparing…'
+                      : task.cancellationRequested
+                        ? 'Stopping…'
+                        : stoppingTaskId === task.jobId
+                          ? 'Stopping…'
+                          : 'Stop'
+                  }}
                 </button>
               </div>
             </div>
@@ -863,7 +1093,12 @@ onUnmounted(() => {
                 class="task-item"
                 :data-selected="selectedTaskId === task.jobId"
               >
-                <button class="task-select" type="button" @click="selectTask(task.jobId)">
+                <button
+                  class="task-select"
+                  type="button"
+                  :disabled="isOptimisticTask(task.jobId)"
+                  @click="selectTask(task.jobId)"
+                >
                   <div class="task-item-heading">
                     <span class="task-state-icon" :data-state="describeTaskState(task).className">
                       {{ describeTaskState(task).icon }}
@@ -871,15 +1106,15 @@ onUnmounted(() => {
                     <span class="task-state-label">{{ describeTaskState(task).label }}</span>
                   </div>
                   <p class="task-item-title">{{ task.issueTitle || `Task ${task.jobId}` }}</p>
-                  <p class="task-item-meta">{{ task.branch || 'trunk' }} · {{ task.status }}</p>
+                  <p class="task-item-meta">{{ formatTaskMeta(task) }}</p>
                 </button>
                 <button
                   class="task-stop"
                   type="button"
-                  :disabled="stoppingTaskId === task.jobId"
+                  :disabled="stoppingTaskId === task.jobId || isOptimisticTask(task.jobId)"
                   @click.stop="stopManagedTaskFromUi(task.jobId)"
                 >
-                  {{ stoppingTaskId === task.jobId ? 'Removing…' : 'Remove' }}
+                  {{ isOptimisticTask(task.jobId) ? 'Preparing…' : stoppingTaskId === task.jobId ? 'Removing…' : 'Remove' }}
                 </button>
               </div>
             </div>
@@ -910,7 +1145,7 @@ onUnmounted(() => {
                     <span class="task-state-label">{{ describeTaskState(task).label }}</span>
                   </div>
                   <p class="task-item-title">{{ task.issueTitle || `Task ${task.jobId}` }}</p>
-                  <p class="task-item-meta">{{ task.branch || 'trunk' }} · {{ task.status }}</p>
+                  <p class="task-item-meta">{{ formatTaskMeta(task) }}</p>
                 </button>
                 <button
                   class="task-stop"

@@ -85,7 +85,7 @@ export const formatStatusProgress = (
 ): string => (progress.detail ? `${progress.message} ${progress.detail}` : progress.message);
 
 const formatTaskLine = (task: ManagedTaskSummaryCliResponse): string => {
-  const label = task.issueTitle || task.issueUrl || `Task ${task.jobId}`;
+  const label = task.issueTitle || task.issueUrl || task.sourceInput || `Task ${task.jobId}`;
   const branch = task.branch ? `branch=${task.branch}` : undefined;
   const progress = task.progress ? `progress=${formatStatusProgress(task.progress)}` : undefined;
   const cancelling = task.cancellationRequested ? 'cancellation=requested' : undefined;

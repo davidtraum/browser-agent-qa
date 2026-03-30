@@ -32,7 +32,7 @@ export const fetchBranches = async (query?: string): Promise<{
 };
 
 export const streamIssueRun = async (
-  issueUrl: string,
+  input: string,
   branch: string,
   onEvent: (event: FeedEvent) => void,
   signal?: AbortSignal,
@@ -42,7 +42,7 @@ export const streamIssueRun = async (
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ issueUrl, branch }),
+    body: JSON.stringify({ input, branch }),
     signal,
   });
 

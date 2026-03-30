@@ -3,32 +3,35 @@ import { streamIssueRun } from '../../../lib/browserAgentClient';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const isGitHubIssueUrl = (value: string): boolean => {
+const isGitHubReferenceUrl = (value: string): boolean => {
   try {
     const parsed = new URL(value);
-    return parsed.hostname === 'github.com' && /^\/[^/]+\/[^/]+\/issues\/\d+(?:\/|$)/.test(parsed.pathname);
+    return (
+      parsed.hostname === 'github.com' &&
+      /^\/[^/]+\/[^/]+\/(issues|pull)\/\d+(?:\/|$)/.test(parsed.pathname)
+    );
   } catch {
     return false;
   }
 };
 
 export async function POST(request: Request) {
-  const body = (await request.json().catch(() => null)) as { issueUrl?: string; branch?: string } | null;
-  const issueUrl = typeof body?.issueUrl === 'string' ? body.issueUrl.trim() : '';
+  const body = (await request.json().catch(() => null)) as
+    | { input?: string; issueUrl?: string; branch?: string }
+    | null;
+  const input =
+    typeof body?.input === 'string'
+      ? body.input.trim()
+      : typeof body?.issueUrl === 'string'
+        ? body.issueUrl.trim()
+        : '';
   const branch = typeof body?.branch === 'string' && body.branch.trim() ? body.branch.trim() : 'trunk';
 
-  if (!issueUrl) {
-    return Response.json({ error: 'Field "issueUrl" is required.' }, { status: 400 });
+  if (!input) {
+    return Response.json({ error: 'Field "input" is required.' }, { status: 400 });
   }
 
-  if (!isGitHubIssueUrl(issueUrl)) {
-    return Response.json(
-      { error: 'Field "issueUrl" must be a valid GitHub issue URL.' },
-      { status: 400 },
-    );
-  }
-
-  const upstream = await streamIssueRun(issueUrl, branch);
+  const upstream = await streamIssueRun(input, branch);
 
   if (!upstream.ok || !upstream.body) {
     const text = await upstream.text();

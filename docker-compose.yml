@@ -8,6 +8,7 @@ services:
     environment:
       REDIS_URL: redis://redis:6379
       QUEUE_NAME: browser-tests
+      CODEX_HOME: /root/.codex
       JOB_TIMEOUT_SECONDS: 300
       SHOPWARE_WORKSPACES_DIR: /tmp/browser-agent-shopware
       SHOPWARE_ADMIN_URL: http://host.docker.internal:5173
@@ -19,6 +20,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
+      - ${HOME}/.codex:/root/.codex
       - /var/run/docker.sock:/var/run/docker.sock
       - /tmp/browser-agent-shopware:/tmp/browser-agent-shopware
     init: true

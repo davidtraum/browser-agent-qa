@@ -4,7 +4,7 @@ export interface RunTestRequestBody {
 }
 
 export interface RunTestFromIssueRequestBody {
-  issueUrl: string;
+  input: string;
   branch?: string;
 }
 
@@ -16,8 +16,10 @@ export interface RunTestJobData {
   timeoutSeconds: number;
   submittedAt: string;
   source?: {
-    issueUrl?: string;
-    issueTitle?: string;
+    kind?: 'issue' | 'pull_request' | 'scenario';
+    input?: string;
+    url?: string;
+    title?: string;
     repository?: string;
   };
   shopware?: {
@@ -41,6 +43,7 @@ export interface RunTestResult {
     finalUrl?: string | null;
     branch?: string | null;
     cancelled?: boolean;
+    stepLimitReached?: boolean;
   };
 }
 
@@ -60,6 +63,8 @@ export interface ManagedTaskSummary {
   attemptsMade: number;
   resultSuccess?: boolean;
   branch?: string;
+  sourceKind?: 'issue' | 'pull_request' | 'scenario';
+  sourceInput?: string;
   issueUrl?: string;
   issueTitle?: string;
   repository?: string;
@@ -92,6 +97,7 @@ export interface ClearFinishedTasksResponse {
 }
 
 export interface GitHubIssueSummary {
+  kind: 'issue' | 'pull_request';
   url: string;
   apiUrl: string;
   repository: string;
@@ -110,6 +116,12 @@ export interface GitHubIssueSummary {
 }
 
 export interface DerivedIssueTestPlan {
+  task: string;
+  steps: string[];
+  summary: string;
+}
+
+export interface DerivedScenarioTestPlan {
   task: string;
   steps: string[];
   summary: string;
@@ -155,6 +167,7 @@ export interface ProgressEventPayload {
 }
 
 export interface StreamedIssueReference {
+  kind: 'issue' | 'pull_request';
   url: string;
   title: string;
   repository: string;
@@ -164,7 +177,8 @@ export interface StreamedIssueReference {
 export type RunTestFromIssueStreamEvent =
   | {
       type: 'accepted';
-      issueUrl: string;
+      input: string;
+      sourceKind: 'github' | 'scenario';
       branch: string;
       timestamp: string;
     }
